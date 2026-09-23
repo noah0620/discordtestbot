@@ -580,6 +580,8 @@ function rolePanelProblem(guild, role) {
 
 client.on(Events.InteractionCreate, async interaction => {
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
+  const interactionAge = Date.now() - interaction.createdTimestamp;
+  console.log(`⏱ Interaction遅延: ${interactionAge}ms / ID=${interaction.id}`);
   try {
     if (interaction.isAutocomplete()) {
       const choices = interaction.commandName.startsWith('earthquake')
