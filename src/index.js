@@ -3,7 +3,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
   TextInputBuilder, TextInputStyle, ChannelType, PermissionFlagsBits, StringSelectMenuBuilder, ChannelSelectMenuBuilder
 } from 'discord.js';
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { config, assertConfig, isBotOwner, isBotOwnerUser } from './config.js';
 import { loadStore, saveStore, guildData } from './db/store.js';
 import { searchRegionChoices, searchPrefectureChoices, PREFECTURES, WEATHER_AREAS, expandWeatherRegion } from './regions.js';
@@ -78,12 +78,17 @@ async function resolveMusicTrack(input){
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
   const webpage=row.webpage_url||row.original_url||row.url;
-  const title=row.title||input;
-  const duration=Number(row.duration)||0;
+  if(!webpage)throw new Error('曲URLを取得できませんでした。');
+  // 取得済みの音声直リンクを保持し、再生直前のyt-dlp二重実行を避ける。
+  const directStreamUrl=(row.webpage_url && validHttpUrl(row.url) && row.url!==row.webpage_url) ? row.url : null;
+  return {title:row.title||input,url:webpage,streamUrl:directStreamUrl,duration:Number(row.duration)||0,id:String(row.id||webpage)};
+}
+async function resolveMusicStreamUrl(webpage){
+  // 再生直前にURLを取り直す。YouTubeの一時URL失効による再生失敗を防ぐ。
   const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
   const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
-  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。');
-  return {title,url:webpage,streamUrl,duration,id:String(row.id||webpage)};
+  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。yt-dlpを更新して再試行してください。');
+  return streamUrl;
 }
 function musicStats(guildId){
   const g=guildData(store,guildId);g.musicStats??={users:{},tracks:{},totalPlays:0};return g.musicStats;
@@ -103,12 +108,50 @@ async function createMusicSession(interaction,vc){
   if(!botClient)throw new Error('このサーバーで利用できる音楽BOTがありません。4同時再生には MUSIC_BOT_TOKEN_2〜4 の追加BOTが必要です。');
   const bg=botClient.guilds.cache.get(interaction.guildId);const bvc=bg?.channels.cache.get(vc.id)||await bg?.channels.fetch(vc.id).catch(()=>null);
   if(!bvc)throw new Error('音楽BOTからボイスチャンネルを取得できません。追加BOTを同じサーバーへ招待してください。');
-  const connection=joinVoiceChannel({channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true});
+  const connection=joinVoiceChannel({
+    channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true,
+    // 追加BOTごとに別groupを使い、同一サーバーで最大4VCを独立接続させる。
+    group:`music-${botClient.user.id}`
+  });
+  connection.on('error',e=>console.error(`voice connection error [${vc.id}]`,e));
+  try{await entersState(connection,VoiceConnectionStatus.Ready,20_000);}catch(e){try{connection.destroy();}catch{};throw new Error(`ボイスチャンネル接続に失敗しました: ${e.message||e}`);}
   const player=createAudioPlayer();connection.subscribe(player);
+  player.on('error',e=>{console.error(`audio player error [${vc.id}]`,e);try{s?.ffmpeg?.kill();}catch{};if(s){s.playing=false;s.current=null;s.ffmpeg=null;s.startedAt=null;setTimeout(()=>playNext(key).catch(console.error),500);}});
   const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,startedAt:null};
   player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
   players.set(key,s);return s;
 }
+
+
+function destroyMusicSession(s){
+  if(!s)return;
+  s.queue.length=0;
+  try{s.ffmpeg?.kill();}catch{}
+  s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;
+  try{s.player.stop(true);}catch{}
+  try{s.connection.destroy();}catch{}
+  players.delete(s.key);
+}
+
+// VCから人間が全員退出したら音楽BOTも自動退出する。
+client.on(Events.VoiceStateUpdate,(oldState,newState)=>{
+  const guildId=oldState.guild?.id||newState.guild?.id;
+  const affected=new Set([oldState.channelId,newState.channelId].filter(Boolean));
+  if(!guildId||!affected.size)return;
+  setTimeout(async()=>{
+    for(const channelId of affected){
+      const s=players.get(musicSessionKey(guildId,channelId));
+      if(!s)continue;
+      const guild=client.guilds.cache.get(s.guildId);
+      const vc=guild?.channels.cache.get(s.voiceChannelId) || await guild?.channels.fetch(s.voiceChannelId).catch(()=>null);
+      if(!vc?.members)continue;
+      if(vc.members.filter(m=>!m.user.bot).size===0){
+        console.log(`👋 VC ${s.voiceChannelId}: 全員退出のため音楽BOTを自動退出`);
+        destroyMusicSession(s);
+      }
+    }
+  },1500);
+});
 
 function createFfmpegAudio(url){
   if(!validHttpUrl(url))throw new Error('再生URLが正しくありません。');
@@ -1909,15 +1952,15 @@ AI生成機能は搭載していません。`
             new ButtonBuilder().setCustomId('music:resume').setLabel('▶ 再開').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId('music:skip').setLabel('⏭ スキップ').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ 停止').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Danger));
+            new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Secondary));
           await interaction.editReply({embeds:[new EmbedBuilder().setTitle('🎵 Music Player').setDescription(`**${track.title}**\n${track.url}\n\nVC: <#${vc.id}> / 担当: <@${sess.client.user.id}>`)],components:[controls]});
           if(!sess.playing)playNext(sess.key).catch(console.error);
         }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
-      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return interaction.reply('⏹️ このVCの再生を停止しました。');}
-      if (n === 'leave') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCに接続中の音楽BOTはありません。',ephemeral:true});s.queue.length=0;try{s.ffmpeg?.kill();}catch{}try{s.player.stop(true);}catch{}try{s.connection.destroy();}catch{}players.delete(s.key);return interaction.reply('👋 音楽BOTをこのボイスチャンネルから退出させました。');}
+      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);}return interaction.reply('⏹️ このVCの再生を停止しました。BOTはVCに残ります。');}
+      if (n === 'leave') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCに接続中の音楽BOTはありません。',ephemeral:true});destroyMusicSession(s);return interaction.reply('👋 音楽BOTをこのボイスチャンネルから退出させました。');}
       if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return interaction.reply('⏸️ 一時停止しました。');}
       if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return interaction.reply('▶️ 再開しました。');}
       if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return interaction.reply(s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
@@ -1929,6 +1972,19 @@ AI生成機能は搭載していません。`
         return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
       }
       if (n === 'video') return interaction.reply(`🎬 ${interaction.options.getString('url',true)}`);
+    }
+
+    // 音楽プレイヤー操作ボタン
+    if(interaction.isButton() && interaction.customId.startsWith('music:')){
+      const action=interaction.customId.split(':')[1];
+      const vcId=interaction.member?.voice?.channelId;
+      const s=vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
+      if(!s)return interaction.reply({content:'❌ 音楽BOTと同じボイスチャンネルに参加してください。',ephemeral:true});
+      if(action==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
+      if(action==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
+      if(action==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
+      if(action==='stop'){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);return interaction.reply({content:'⏹️ 再生を停止しました。BOTはVCに残ります。',ephemeral:true});}
+      if(action==='leave'){destroyMusicSession(s);return interaction.reply({content:'👋 音楽BOTをこのボイスチャンネルから退出させました。',ephemeral:true});}
     }
 
     // 自動販売機 管理パネル操作
@@ -2286,28 +2342,16 @@ AI生成機能は搭載していません。`
         }
       }
       if (kind === 'music') {
-        const s=players.get(interaction.guildId);
+        const s=sessionForInteraction(interaction);
+        if(!s)return interaction.reply({content:'先に対象のボイスチャンネルへ参加してください。',ephemeral:true});
         if(a==='stop'){
-          if(s){
-            s.queue.length=0;
-            try{s.ffmpeg?.kill();}catch{}
-            s.player.stop(true);
-            try{s.connection.destroy();}catch{}
-            players.delete(s.key);
-          }
-          return interaction.reply({content:'⏹️ 再生を停止しました。',ephemeral:true});
+          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);
+          return interaction.reply({content:'⏹️ 再生を停止しました。BOTはVCに残ります。',ephemeral:true});
         }
         if(a==='leave'){
-          const leaveSession=sessionForInteraction(interaction);
-          if(!leaveSession)return interaction.reply({content:'このVCに接続中の音楽BOTはありません。',ephemeral:true});
-          leaveSession.queue.length=0;
-          try{leaveSession.ffmpeg?.kill();}catch{}
-          try{leaveSession.player.stop(true);}catch{}
-          try{leaveSession.connection.destroy();}catch{}
-          players.delete(leaveSession.key);
-          return interaction.reply({content:'👋 音楽BOTをこのボイスチャンネルから退出させました。',ephemeral:true});
+          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
+          return interaction.reply({content:'👋 音楽BOTをVCから退出させました。',ephemeral:true});
         }
-        if(!s)return interaction.reply({content:'現在再生中の音楽はありません。',ephemeral:true});
         if(a==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
         if(a==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
         if(a==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
@@ -2549,7 +2593,8 @@ async function playNext(key){
   if(!s||s.playing||!s.queue.length)return;
   const track=s.queue.shift();
   try{
-    const {proc,resource}=createFfmpegAudio(track.streamUrl);
+    const streamUrl=track.streamUrl||await resolveMusicStreamUrl(track.url);
+    const {proc,resource}=createFfmpegAudio(streamUrl);
     s.current=track;s.playing=true;s.ffmpeg=proc;s.startedAt=Date.now();
     resource.volume?.setVolume((s.volume??100)/100);recordTrackStart(s.guildId,track);
     proc.on('error',e=>{console.error('ffmpeg process error',e);s.playing=false;s.current=null;s.ffmpeg=null;try{s.player.stop(true);}catch{}});
