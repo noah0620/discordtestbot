@@ -591,6 +591,17 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isChatInputCommand()) {
       const n = interaction.commandName;
 
+      // /play はDiscordの3秒応答期限を確実に守るため、共通処理より先にACKする。
+      // ここでdeferした後は /play 内では editReply のみを使用する。
+      if(n === 'play' && !interaction.deferred && !interaction.replied){
+        try{
+          await interaction.deferReply();
+        }catch(e){
+          console.error('❌ /play 初期応答(deferReply)失敗:', e);
+          return;
+        }
+      }
+
       if(ADMIN_COMMANDS.has(n) && !hasConfiguredAdminRole(interaction)){
         const g=guildData(store,interaction.guildId);
         return interaction.reply({
@@ -1909,8 +1920,10 @@ AI生成機能は搭載していません。`
 
       if (n === 'play') {
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
-        if(!vc)return interaction.reply({content:'❌ 先にボイスチャンネルへ参加してください。',ephemeral:true});
-        await interaction.deferReply();
+        if(!vc){
+          await interaction.editReply({content:'❌ 先にボイスチャンネルへ参加してください。'}).catch(()=>{});
+          return;
+        }
         try{
           const track=await resolveMusicTrack(input);const sess=await createMusicSession(interaction,vc);
           sess.queue.push({...track,requesterId:interaction.user.id});
@@ -1922,7 +1935,10 @@ AI生成機能は搭載していません。`
             new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Secondary));
           await interaction.editReply({embeds:[new EmbedBuilder().setTitle('🎵 Music Player').setDescription(`**${track.title}**\n${track.url}\n\nVC: <#${vc.id}> / 担当: <@${sess.client.user.id}>`)],components:[controls]});
           if(!sess.playing)playNext(sess.key).catch(console.error);
-        }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
+        }catch(e){
+          console.error('❌ /play 再生準備エラー:',e);
+          await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`).catch(()=>{});
+        }return;
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
