@@ -11,7 +11,6 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
 import Parser from 'rss-parser';
-import youtubedl from 'youtube-dl-exec';
 
 assertConfig();
 const store = loadStore();
@@ -71,10 +70,36 @@ function sessionForInteraction(interaction){
   return vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
 }
 function fmtDuration(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60);return h?`${h}時間${m}分`:(m?`${m}分${s}秒`:`${s}秒`);}
+// Windowsでは youtube-dl-exec のラッパーが python3 を要求するため、同梱の yt-dlp.exe を直接実行する。
+// Linux/macOSでは従来の bin/yt-dlp を利用する。
+const ytDlpBinary = path.resolve(
+  process.cwd(),
+  'node_modules', 'youtube-dl-exec', 'bin',
+  process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'
+);
+
+function runYtDlp(args, timeoutMs=45_000){
+  return new Promise((resolve,reject)=>{
+    const proc=spawn(ytDlpBinary,args,{windowsHide:true,stdio:['ignore','pipe','pipe']});
+    let out='',err='';
+    const timer=setTimeout(()=>{try{proc.kill();}catch{};reject(new Error('yt-dlp がタイムアウトしました。'));},timeoutMs);
+    proc.stdout.on('data',d=>{out+=String(d);});
+    proc.stderr.on('data',d=>{err+=String(d);});
+    proc.on('error',e=>{clearTimeout(timer);reject(new Error(`yt-dlpを起動できません: ${e.message}`));});
+    proc.on('close',code=>{
+      clearTimeout(timer);
+      if(code===0)return resolve(out.trim());
+      reject(new Error(`yt-dlp エラー (${code}): ${(err||out||'詳細なし').trim().slice(0,1200)}`));
+    });
+  });
+}
+
 async function resolveMusicTrack(input){
   const isUrl=/^https?:\/\//i.test(input);
   const target=isUrl?input:`ytsearch1:${input}`;
-  const info=await youtubedl(target,{dumpSingleJson:true,noPlaylist:true,skipDownload:true,noWarnings:true});
+  const raw=await runYtDlp(['--dump-single-json','--no-playlist','--skip-download','--no-warnings',target]);
+  let info;
+  try{info=JSON.parse(raw);}catch{throw new Error('yt-dlpの検索結果を解析できませんでした。');}
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
   const webpage=row.webpage_url||row.original_url||row.url;
@@ -83,7 +108,7 @@ async function resolveMusicTrack(input){
 }
 async function resolveMusicStreamUrl(webpage){
   // 再生直前にURLを取り直す。YouTubeの一時URL失効による再生失敗を防ぐ。
-  const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
+  const stream=await runYtDlp(['--get-url','-f','bestaudio/best','--no-playlist','--no-warnings',webpage]);
   const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
   if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。yt-dlpを更新して再試行してください。');
   return streamUrl;
