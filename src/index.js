@@ -133,25 +133,7 @@ function destroyMusicSession(s){
   players.delete(s.key);
 }
 
-// VCから人間が全員退出したら音楽BOTも自動退出する。
-client.on(Events.VoiceStateUpdate,(oldState,newState)=>{
-  const guildId=oldState.guild?.id||newState.guild?.id;
-  const affected=new Set([oldState.channelId,newState.channelId].filter(Boolean));
-  if(!guildId||!affected.size)return;
-  setTimeout(async()=>{
-    for(const channelId of affected){
-      const s=players.get(musicSessionKey(guildId,channelId));
-      if(!s)continue;
-      const guild=client.guilds.cache.get(s.guildId);
-      const vc=guild?.channels.cache.get(s.voiceChannelId) || await guild?.channels.fetch(s.voiceChannelId).catch(()=>null);
-      if(!vc?.members)continue;
-      if(vc.members.filter(m=>!m.user.bot).size===0){
-        console.log(`👋 VC ${s.voiceChannelId}: 全員退出のため音楽BOTを自動退出`);
-        destroyMusicSession(s);
-      }
-    }
-  },1500);
-});
+
 
 function createFfmpegAudio(url){
   if(!validHttpUrl(url))throw new Error('再生URLが正しくありません。');
@@ -246,6 +228,27 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.User]
 });
+
+// VCから人間が全員退出したら音楽BOTも自動退出する。
+client.on(Events.VoiceStateUpdate,(oldState,newState)=>{
+  const guildId=oldState.guild?.id||newState.guild?.id;
+  const affected=new Set([oldState.channelId,newState.channelId].filter(Boolean));
+  if(!guildId||!affected.size)return;
+  setTimeout(async()=>{
+    for(const channelId of affected){
+      const s=players.get(musicSessionKey(guildId,channelId));
+      if(!s)continue;
+      const guild=client.guilds.cache.get(s.guildId);
+      const vc=guild?.channels.cache.get(s.voiceChannelId) || await guild?.channels.fetch(s.voiceChannelId).catch(()=>null);
+      if(!vc?.members)continue;
+      if(vc.members.filter(m=>!m.user.bot).size===0){
+        console.log(`👋 VC ${s.voiceChannelId}: 全員退出のため音楽BOTを自動退出`);
+        destroyMusicSession(s);
+      }
+    }
+  },1500);
+});
+
 
 const rssParser=new Parser({timeout:15000,headers:{'User-Agent':'NoahXJP-Discord-NewsBot/1.0'}});
 
