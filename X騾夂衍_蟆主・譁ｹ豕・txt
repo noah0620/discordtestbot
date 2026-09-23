@@ -1,0 +1,8 @@
+X通知機能（複数登録可能）
+1. 既存の .env と data フォルダーをバックアップして、このZIPのDiscord_MultiBot内にコピーしてください。
+2. このフォルダーで npm install → npm run deploy-commands → npm start
+3. /x-add url:https://x.com/ユーザー名 channel:通知先 をアカウントごとに実行。
+4. /x-list でID確認、/x-edit で投稿先変更、/x-remove で削除、/x-test でテスト。
+監視間隔: 約60秒。既存投稿は初回登録時に既読にして新着から通知します。
+Xのフィード取得にはRSSHub等の動作するRSSブリッジが必要です。環境変数 SOCIAL_RSS_BRIDGE_URL=http://127.0.0.1:1200 等を既存.envに設定してください。X側の制限で取得できない場合があります。
+このZIPは機密情報保護とサイズ削減のため .env、data、node_modules を含みません。

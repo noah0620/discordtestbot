@@ -1,0 +1,25 @@
+{
+  "name": "discord-multibot-v5-14-5-auto-watchers-fixed",
+  "version": "6.0.0",
+  "description": "Discord MultiBot v5.9 - enhanced vending, purchase tickets, sales feed and social profile RSS.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy-commands": "node src/deploy-commands.js",
+    "clear-commands": "node src/clear-commands.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.2",
+    "ffmpeg-static": "^5.2.0",
+    "opusscript": "^0.1.1",
+    "libsodium-wrappers": "^0.7.15",
+    "rss-parser": "^3.13.0",
+    "youtube-dl-exec": "^3.1.15"
+  }
+}
