@@ -8,15 +8,28 @@ import { config, assertConfig, isBotOwner, isBotOwnerUser } from './config.js';
 import { loadStore, saveStore, guildData } from './db/store.js';
 import { searchRegionChoices, searchPrefectureChoices, PREFECTURES, WEATHER_AREAS, expandWeatherRegion } from './regions.js';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import ffmpegPath from 'ffmpeg-static';
+import ffmpegStaticPath from 'ffmpeg-static';
 import Parser from 'rss-parser';
-import youtubedl from 'youtube-dl-exec';
+import youtubedlPackage from 'youtube-dl-exec';
+
+const __filename=fileURLToPath(import.meta.url);
+const __dirname=path.dirname(__filename);
+const bundledYtDlp=path.resolve(__dirname,'../bin/yt-dlp.exe');
+const bundledFfmpeg=path.resolve(__dirname,'../bin/ffmpeg.exe');
+
+// Windows用実行ファイルをプロジェクト内に同梱して直接使用。
+// npmのinstall scriptがブロックされても python / python3 を必要としない。
+const youtubedl=youtubedlPackage.create(bundledYtDlp);
+const ffmpegPath=bundledFfmpeg;
 
 assertConfig();
 const store = loadStore();
 console.log(`🔐 BOTオーナーID読込: ${config.ownerIds.length}件 / .env: ${config.envPath}`);
 console.log(`💾 データ保存先: ${config.dataDir}`);
+console.log(`🎵 yt-dlp: ${bundledYtDlp}`);
+console.log(`🎵 ffmpeg: ${ffmpegPath}`);
 const players = new Map(); // key: guildId:voiceChannelId
 const musicBotClients=[];
 const pendingRoleCreates = new Map();
@@ -78,18 +91,14 @@ async function resolveMusicTrack(input){
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
   const webpage=row.webpage_url||row.original_url||row.url;
-  if(!webpage)throw new Error('曲URLを取得できませんでした。');
-  // 取得済みの音声直リンクを保持し、再生直前のyt-dlp二重実行を避ける。
-  const directStreamUrl=(row.webpage_url && validHttpUrl(row.url) && row.url!==row.webpage_url) ? row.url : null;
-  return {title:row.title||input,url:webpage,streamUrl:directStreamUrl,duration:Number(row.duration)||0,id:String(row.id||webpage)};
-}
-async function resolveMusicStreamUrl(webpage){
-  // 再生直前にURLを取り直す。YouTubeの一時URL失効による再生失敗を防ぐ。
+  const title=row.title||input;
+  const duration=Number(row.duration)||0;
   const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
   const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
-  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。yt-dlpを更新して再試行してください。');
-  return streamUrl;
+  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。');
+  return {title,url:webpage,streamUrl,duration,id:String(row.id||webpage)};
 }
+
 function musicStats(guildId){
   const g=guildData(store,guildId);g.musicStats??={users:{},tracks:{},totalPlays:0};return g.musicStats;
 }
@@ -2596,8 +2605,7 @@ async function playNext(key){
   if(!s||s.playing||!s.queue.length)return;
   const track=s.queue.shift();
   try{
-    const streamUrl=track.streamUrl||await resolveMusicStreamUrl(track.url);
-    const {proc,resource}=createFfmpegAudio(streamUrl);
+    const {proc,resource}=createFfmpegAudio(track.streamUrl);
     s.current=track;s.playing=true;s.ffmpeg=proc;s.startedAt=Date.now();
     resource.volume?.setVolume((s.volume??100)/100);recordTrackStart(s.guildId,track);
     proc.on('error',e=>{console.error('ffmpeg process error',e);s.playing=false;s.current=null;s.ffmpeg=null;try{s.player.stop(true);}catch{}});
