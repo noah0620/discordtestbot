@@ -1,0 +1,74 @@
+{
+  "guilds": {
+    "1549089863612113027": {
+      "joinLogChannelId": null,
+      "joinTitle": "📥 メンバー参加",
+      "verificationPanelChannelId": null,
+      "mediaLibrary": [],
+      "nextMediaId": 1,
+      "leaveLogChannelId": null,
+      "adminRoleId": null,
+      "adminRoleIds": [],
+      "verificationRoleId": null,
+      "verificationReviewChannelId": null,
+      "ticketCategoryId": null,
+      "ticketSupportRoleId": null,
+      "ticketLogChannelId": null,
+      "roleOptions": [],
+      "rolePanels": {},
+      "verificationPanels": {},
+      "earthquakeChannelId": null,
+      "weatherChannelId": null,
+      "autoReplies": {},
+      "socialSources": [],
+      "nextSocialSourceId": 1,
+      "socialSeen": {},
+      "newsAutoEnabled": false,
+      "newsSources": [],
+      "nextNewsSourceId": 1,
+      "newsSeen": {},
+      "weatherRegions": [],
+      "weatherChannelRoutes": {},
+      "earthquakeRegions": [],
+      "minIntensity": 3,
+      "weatherAutoEnabled": false,
+      "weatherAutoTime": "07:00",
+      "earthquakeAutoEnabled": false,
+      "earthquakeJobs": [],
+      "lastWeatherPostDate": null,
+      "weatherSetupUpdatedAt": null,
+      "earthquakeSetupUpdatedAt": null,
+      "musicStats": {
+        "users": {
+          "985029300484968520": {
+            "name": "noa1955",
+            "seconds": 180
+          }
+        },
+        "tracks": {
+          "sL8-vrfTR7k": {
+            "title": "Indila - Love Story (Slowed-Reverb)",
+            "url": "https://www.youtube.com/watch?v=sL8-vrfTR7k",
+            "plays": 1,
+            "seconds": 215
+          }
+        },
+        "totalPlays": 1
+      },
+      "weatherLastSentByChannel": {}
+    }
+  },
+  "shops": {},
+  "orders": {},
+  "schedules": [],
+  "moderationRules": [],
+  "verificationRequests": {},
+  "nextVerificationRequestId": 1,
+  "tickets": {},
+  "nextTicketId": 1,
+  "nextShopId": 1,
+  "nextOrderId": 1,
+  "nextScheduleId": 1,
+  "nextRuleId": 1,
+  "lastEarthquakeEventId": "6ab3fff4e88ee598246bf34c"
+}

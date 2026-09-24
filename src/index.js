@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import ffmpegStaticPath from 'ffmpeg-static';
 import Parser from 'rss-parser';
-import youtubedlPackage from 'youtube-dl-exec';
 
 const __filename=fileURLToPath(import.meta.url);
 const __dirname=path.dirname(__filename);
@@ -21,7 +20,6 @@ const bundledFfmpeg=path.resolve(__dirname,'../bin/ffmpeg.exe');
 
 // Windows用実行ファイルをプロジェクト内に同梱して直接使用。
 // npmのinstall scriptがブロックされても python / python3 を必要としない。
-const youtubedl=youtubedlPackage.create(bundledYtDlp);
 const ffmpegPath=bundledFfmpeg;
 
 assertConfig();
@@ -30,6 +28,9 @@ console.log(`🔐 BOTオーナーID読込: ${config.ownerIds.length}件 / .env: 
 console.log(`💾 データ保存先: ${config.dataDir}`);
 console.log(`🎵 yt-dlp: ${bundledYtDlp}`);
 console.log(`🎵 ffmpeg: ${ffmpegPath}`);
+if(!bundledYtDlp.toLowerCase().endsWith('.exe')){
+  console.warn('⚠️ yt-dlp実行ファイルのパスを確認してください。');
+}
 const players = new Map(); // key: guildId:voiceChannelId
 const musicBotClients=[];
 const pendingRoleCreates = new Map();
@@ -84,19 +85,89 @@ function sessionForInteraction(interaction){
   return vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
 }
 function fmtDuration(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60);return h?`${h}時間${m}分`:(m?`${m}分${s}秒`:`${s}秒`);}
+function runYtDlp(args,{timeoutMs=45000}={}){
+  return new Promise((resolve,reject)=>{
+    const proc=spawn(bundledYtDlp,args,{
+      windowsHide:true,
+      stdio:['ignore','pipe','pipe']
+    });
+    let stdout='',stderr='';
+    const timer=setTimeout(()=>{
+      try{proc.kill();}catch{}
+      reject(new Error(`yt-dlpが${Math.round(timeoutMs/1000)}秒以内に応答しませんでした。`));
+    },timeoutMs);
+
+    proc.stdout.on('data',d=>stdout+=d.toString('utf8'));
+    proc.stderr.on('data',d=>stderr+=d.toString('utf8'));
+    proc.on('error',err=>{
+      clearTimeout(timer);
+      reject(new Error(`yt-dlpを起動できません: ${err.message}`));
+    });
+    proc.on('close',code=>{
+      clearTimeout(timer);
+      if(code===0)return resolve({stdout:stdout.trim(),stderr:stderr.trim()});
+      const detail=(stderr||stdout||`終了コード ${code}`).trim();
+      reject(new Error(`yt-dlpエラー (code ${code}): ${detail.slice(0,1800)}`));
+    });
+  });
+}
+
 async function resolveMusicTrack(input){
-  const isUrl=/^https?:\/\//i.test(input);
-  const target=isUrl?input:`ytsearch1:${input}`;
-  const info=await youtubedl(target,{dumpSingleJson:true,noPlaylist:true,skipDownload:true,noWarnings:true});
+  const value=String(input||'').trim();
+  if(!value)throw new Error('曲名またはURLを入力してください。');
+
+  const isUrl=/^https?:\/\//i.test(value);
+  const target=isUrl?value:`ytsearch1:${value}`;
+
+  // 1回目: タイトル・動画URL・再生時間を取得
+  const meta=await runYtDlp([
+    '--dump-single-json',
+    '--no-playlist',
+    '--no-warnings',
+    '--no-progress',
+    target
+  ]);
+
+  let info;
+  try{info=JSON.parse(meta.stdout);}
+  catch{
+    throw new Error(`yt-dlpの動画情報を解析できませんでした。\n出力: ${meta.stdout.slice(0,1200)}`);
+  }
+
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
-  const webpage=row.webpage_url||row.original_url||row.url;
-  const title=row.title||input;
-  const duration=Number(row.duration)||0;
-  const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
-  const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
-  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。');
-  return {title,url:webpage,streamUrl,duration,id:String(row.id||webpage)};
+
+  const webpage=row.webpage_url||row.original_url||
+    (row.id?`https://www.youtube.com/watch?v=${row.id}`:null);
+
+  if(!webpage)throw new Error('再生元URLを取得できませんでした。');
+
+  // 2回目: ffmpegへ直接渡せる音声ストリームURLを取得
+  const stream=await runYtDlp([
+    '--get-url',
+    '--format','bestaudio/best',
+    '--no-playlist',
+    '--no-warnings',
+    '--no-progress',
+    webpage
+  ]);
+
+  const streamUrl=stream.stdout
+    .split(/\r?\n/)
+    .map(x=>x.trim())
+    .find(x=>/^https?:\/\//i.test(x));
+
+  if(!streamUrl){
+    throw new Error(`音声ストリームURLを取得できませんでした。\nyt-dlp出力: ${stream.stdout.slice(0,1200)}`);
+  }
+
+  return {
+    title:row.title||value,
+    url:webpage,
+    streamUrl,
+    duration:Number(row.duration)||0,
+    id:String(row.id||webpage)
+  };
 }
 
 function musicStats(guildId){
@@ -1967,7 +2038,11 @@ AI生成機能は搭載していません。`
             new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Secondary));
           await interaction.editReply({embeds:[new EmbedBuilder().setTitle('🎵 Music Player').setDescription(`**${track.title}**\n${track.url}\n\nVC: <#${vc.id}> / 担当: <@${sess.client.user.id}>`)],components:[controls]});
           if(!sess.playing)playNext(sess.key).catch(console.error);
-        }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
+        }catch(e){
+          console.error('❌ /play 再生準備エラー:',e);
+          const detail=String(e?.message||e||'不明なエラー');
+          await interaction.editReply(`❌ 再生準備に失敗しました。\n\n${detail.slice(0,1800)}`);
+        }return;
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
