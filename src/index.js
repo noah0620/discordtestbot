@@ -3,34 +3,20 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
   TextInputBuilder, TextInputStyle, ChannelType, PermissionFlagsBits, StringSelectMenuBuilder, ChannelSelectMenuBuilder
 } from 'discord.js';
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType } from '@discordjs/voice';
 import { config, assertConfig, isBotOwner, isBotOwnerUser } from './config.js';
 import { loadStore, saveStore, guildData } from './db/store.js';
 import { searchRegionChoices, searchPrefectureChoices, PREFECTURES, WEATHER_AREAS, expandWeatherRegion } from './regions.js';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import ffmpegStaticPath from 'ffmpeg-static';
+import ffmpegPath from 'ffmpeg-static';
 import Parser from 'rss-parser';
-
-const __filename=fileURLToPath(import.meta.url);
-const __dirname=path.dirname(__filename);
-const bundledYtDlp=path.resolve(__dirname,'../bin/yt-dlp.exe');
-const bundledFfmpeg=path.resolve(__dirname,'../bin/ffmpeg.exe');
-
-// Windows用実行ファイルをプロジェクト内に同梱して直接使用。
-// npmのinstall scriptがブロックされても python / python3 を必要としない。
-const ffmpegPath=bundledFfmpeg;
+import youtubedl from 'youtube-dl-exec';
 
 assertConfig();
 const store = loadStore();
 console.log(`🔐 BOTオーナーID読込: ${config.ownerIds.length}件 / .env: ${config.envPath}`);
 console.log(`💾 データ保存先: ${config.dataDir}`);
-console.log(`🎵 yt-dlp: ${bundledYtDlp}`);
-console.log(`🎵 ffmpeg: ${ffmpegPath}`);
-if(!bundledYtDlp.toLowerCase().endsWith('.exe')){
-  console.warn('⚠️ yt-dlp実行ファイルのパスを確認してください。');
-}
 const players = new Map(); // key: guildId:voiceChannelId
 const musicBotClients=[];
 const pendingRoleCreates = new Map();
@@ -85,91 +71,20 @@ function sessionForInteraction(interaction){
   return vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
 }
 function fmtDuration(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60);return h?`${h}時間${m}分`:(m?`${m}分${s}秒`:`${s}秒`);}
-function runYtDlp(args,{timeoutMs=45000}={}){
-  return new Promise((resolve,reject)=>{
-    const proc=spawn(bundledYtDlp,args,{
-      windowsHide:true,
-      stdio:['ignore','pipe','pipe']
-    });
-    let stdout='',stderr='';
-    const timer=setTimeout(()=>{
-      try{proc.kill();}catch{}
-      reject(new Error(`yt-dlpが${Math.round(timeoutMs/1000)}秒以内に応答しませんでした。`));
-    },timeoutMs);
-
-    proc.stdout.on('data',d=>stdout+=d.toString('utf8'));
-    proc.stderr.on('data',d=>stderr+=d.toString('utf8'));
-    proc.on('error',err=>{
-      clearTimeout(timer);
-      reject(new Error(`yt-dlpを起動できません: ${err.message}`));
-    });
-    proc.on('close',code=>{
-      clearTimeout(timer);
-      if(code===0)return resolve({stdout:stdout.trim(),stderr:stderr.trim()});
-      const detail=(stderr||stdout||`終了コード ${code}`).trim();
-      reject(new Error(`yt-dlpエラー (code ${code}): ${detail.slice(0,1800)}`));
-    });
-  });
-}
-
 async function resolveMusicTrack(input){
-  const value=String(input||'').trim();
-  if(!value)throw new Error('曲名またはURLを入力してください。');
-
-  const isUrl=/^https?:\/\//i.test(value);
-  const target=isUrl?value:`ytsearch1:${value}`;
-
-  // 1回目: タイトル・動画URL・再生時間を取得
-  const meta=await runYtDlp([
-    '--dump-single-json',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-progress',
-    target
-  ]);
-
-  let info;
-  try{info=JSON.parse(meta.stdout);}
-  catch{
-    throw new Error(`yt-dlpの動画情報を解析できませんでした。\n出力: ${meta.stdout.slice(0,1200)}`);
-  }
-
+  const isUrl=/^https?:\/\//i.test(input);
+  const target=isUrl?input:`ytsearch1:${input}`;
+  const info=await youtubedl(target,{dumpSingleJson:true,noPlaylist:true,skipDownload:true,noWarnings:true});
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
-
-  const webpage=row.webpage_url||row.original_url||
-    (row.id?`https://www.youtube.com/watch?v=${row.id}`:null);
-
-  if(!webpage)throw new Error('再生元URLを取得できませんでした。');
-
-  // 2回目: ffmpegへ直接渡せる音声ストリームURLを取得
-  const stream=await runYtDlp([
-    '--get-url',
-    '--format','bestaudio/best',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-progress',
-    webpage
-  ]);
-
-  const streamUrl=stream.stdout
-    .split(/\r?\n/)
-    .map(x=>x.trim())
-    .find(x=>/^https?:\/\//i.test(x));
-
-  if(!streamUrl){
-    throw new Error(`音声ストリームURLを取得できませんでした。\nyt-dlp出力: ${stream.stdout.slice(0,1200)}`);
-  }
-
-  return {
-    title:row.title||value,
-    url:webpage,
-    streamUrl,
-    duration:Number(row.duration)||0,
-    id:String(row.id||webpage)
-  };
+  const webpage=row.webpage_url||row.original_url||row.url;
+  const title=row.title||input;
+  const duration=Number(row.duration)||0;
+  const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
+  const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
+  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。');
+  return {title,url:webpage,streamUrl,duration,id:String(row.id||webpage)};
 }
-
 function musicStats(guildId){
   const g=guildData(store,guildId);g.musicStats??={users:{},tracks:{},totalPlays:0};return g.musicStats;
 }
@@ -188,32 +103,12 @@ async function createMusicSession(interaction,vc){
   if(!botClient)throw new Error('このサーバーで利用できる音楽BOTがありません。4同時再生には MUSIC_BOT_TOKEN_2〜4 の追加BOTが必要です。');
   const bg=botClient.guilds.cache.get(interaction.guildId);const bvc=bg?.channels.cache.get(vc.id)||await bg?.channels.fetch(vc.id).catch(()=>null);
   if(!bvc)throw new Error('音楽BOTからボイスチャンネルを取得できません。追加BOTを同じサーバーへ招待してください。');
-  const connection=joinVoiceChannel({
-    channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true,
-    // 追加BOTごとに別groupを使い、同一サーバーで最大4VCを独立接続させる。
-    group:`music-${botClient.user.id}`
-  });
-  connection.on('error',e=>console.error(`voice connection error [${vc.id}]`,e));
-  try{await entersState(connection,VoiceConnectionStatus.Ready,20_000);}catch(e){try{connection.destroy();}catch{};throw new Error(`ボイスチャンネル接続に失敗しました: ${e.message||e}`);}
+  const connection=joinVoiceChannel({channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true});
   const player=createAudioPlayer();connection.subscribe(player);
-  player.on('error',e=>{console.error(`audio player error [${vc.id}]`,e);try{s?.ffmpeg?.kill();}catch{};if(s){s.playing=false;s.current=null;s.ffmpeg=null;s.startedAt=null;setTimeout(()=>playNext(key).catch(console.error),500);}});
   const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,startedAt:null};
   player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
   players.set(key,s);return s;
 }
-
-
-function destroyMusicSession(s){
-  if(!s)return;
-  s.queue.length=0;
-  try{s.ffmpeg?.kill();}catch{}
-  s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;
-  try{s.player.stop(true);}catch{}
-  try{s.connection.destroy();}catch{}
-  players.delete(s.key);
-}
-
-
 
 function createFfmpegAudio(url){
   if(!validHttpUrl(url))throw new Error('再生URLが正しくありません。');
@@ -308,27 +203,6 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.User]
 });
-
-// VCから人間が全員退出したら音楽BOTも自動退出する。
-client.on(Events.VoiceStateUpdate,(oldState,newState)=>{
-  const guildId=oldState.guild?.id||newState.guild?.id;
-  const affected=new Set([oldState.channelId,newState.channelId].filter(Boolean));
-  if(!guildId||!affected.size)return;
-  setTimeout(async()=>{
-    for(const channelId of affected){
-      const s=players.get(musicSessionKey(guildId,channelId));
-      if(!s)continue;
-      const guild=client.guilds.cache.get(s.guildId);
-      const vc=guild?.channels.cache.get(s.voiceChannelId) || await guild?.channels.fetch(s.voiceChannelId).catch(()=>null);
-      if(!vc?.members)continue;
-      if(vc.members.filter(m=>!m.user.bot).size===0){
-        console.log(`👋 VC ${s.voiceChannelId}: 全員退出のため音楽BOTを自動退出`);
-        destroyMusicSession(s);
-      }
-    }
-  },1500);
-});
-
 
 const rssParser=new Parser({timeout:15000,headers:{'User-Agent':'NoahXJP-Discord-NewsBot/1.0'}});
 
@@ -695,24 +569,6 @@ function rolePanelProblem(guild, role) {
 }
 
 client.on(Events.InteractionCreate, async interaction => {
-  // Slash command はDiscordの3秒制限より先に即時ACKする。
-  // /play の検索やVC接続より前に実行することで Unknown interaction(10062) を防ぐ。
-  if(interaction.isChatInputCommand() && !interaction.deferred && !interaction.replied){
-    try{
-      if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
-    }catch(ackError){
-      if(ackError?.code===10062){
-        console.warn('⚠️ Interaction 10062: 応答期限切れ/別インスタンス処理済みのため、この操作を終了します。');
-        return;
-      }
-      if(ackError?.code===40060){
-        console.warn('⚠️ Interaction 40060: すでに応答済みのため処理を継続します。');
-      }else{
-        throw ackError;
-      }
-    }
-  }
-
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
   try {
     if (interaction.isAutocomplete()) {
@@ -1303,7 +1159,7 @@ AI生成機能は搭載していません。`
         g.weatherRegions=[...new Set(regions)]; g.weatherChannelId=ch.id; g.weatherChannelRoutes={}; g.weatherAutoTime=time; g.weatherAutoEnabled=enabled; g.lastWeatherPostDate=null; g.weatherLastSentByChannel={};
         g.weatherSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1322,7 +1178,7 @@ AI生成機能は搭載していません。`
         g.earthquakeRegions=regions; g.earthquakeChannelId=ch.id; g.minIntensity=min; g.earthquakeAutoEnabled=enabled;
         g.earthquakeSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1573,7 +1429,7 @@ AI生成機能は搭載していません。`
         const username=socialUsername('twitter',input);
         if(platform!=='twitter'||!username||!/^\w{1,15}$/.test(username))return interaction.reply({content:'❌ XのプロフィールURL（https://x.com/ユーザー名）を指定してください。',ephemeral:true});
         if(!channel?.isTextBased())return interaction.reply({content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         try{
           const resolved=await resolveSocialFeedAuto('twitter',input);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',input)):await rssParser.parseURL(resolved.feedUrl);
@@ -1607,7 +1463,7 @@ AI生成機能は搭載していません。`
           source.channelId=channel.id;saveStore(store);
           return interaction.reply({content:`✅ X監視 #${id} の投稿先を ${channel} に変更しました。`,ephemeral:true});
         }
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 最新投稿が取得できませんでした。');
@@ -1643,7 +1499,7 @@ AI生成機能は搭載していません。`
         if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのURLではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
         if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定したDiscordチャンネルへ投稿できません。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         try{
           const resolved=await resolveSocialFeedAuto(platform,profileUrl);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',profileUrl)):await rssParser.parseURL(resolved.feedUrl);
@@ -1678,7 +1534,7 @@ AI生成機能は搭載していません。`
       if (n === 'social-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.socialSources.find(x=>x.id===id);
         if(!source)return interaction.reply({content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 投稿を取得できません。');
@@ -1699,7 +1555,7 @@ AI生成機能は搭載していません。`
         if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのチャンネルではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
         if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定チャンネルへ投稿できません。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         let feed;
         try{feed=await fetchNewsFeed({feedUrl});}catch(e){console.error(e);return interaction.editReply('❌ フィードを取得できません。通常の記事URLではなくRSS/Atom URLを指定してください。');}
         const id=g.nextNewsSourceId++;
@@ -1726,7 +1582,7 @@ AI生成機能は搭載していません。`
       if (n === 'news-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.newsSources.find(x=>x.id===id);
         if(!source)return interaction.reply({content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         try{
           const feed=await fetchNewsFeed(source),item=feed.items?.[0];if(!item)return interaction.editReply('❌ 記事がありません。');
           const ch=interaction.guild.channels.cache.get(source.channelId)||await interaction.guild.channels.fetch(source.channelId).catch(()=>null);
@@ -1755,7 +1611,7 @@ AI生成機能は搭載していません。`
           });
         }
 
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply();
         const pages=await buildWeatherPages(regions);
         return replyWeatherPages(interaction,pages);
       }
@@ -1988,7 +1844,7 @@ AI生成機能は搭載していません。`
       }
 
       if (n === 'earthquake') {
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
+        await interaction.deferReply();return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
       }
       if (n === 'earthquake-register') {
         const g=guildData(store,interaction.guildId),r=interaction.options.getString('region',true),min=interaction.options.getInteger('min_intensity');
@@ -2044,7 +1900,7 @@ AI生成機能は搭載していません。`
       if (n === 'play') {
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
         if(!vc)return interaction.reply({content:'❌ 先にボイスチャンネルへ参加してください。',ephemeral:true});
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply();
         try{
           const track=await resolveMusicTrack(input);const sess=await createMusicSession(interaction,vc);
           sess.queue.push({...track,requesterId:interaction.user.id});
@@ -2052,20 +1908,14 @@ AI生成機能は搭載していません。`
             new ButtonBuilder().setCustomId('music:pause').setLabel('⏸ 一時停止').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music:resume').setLabel('▶ 再開').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId('music:skip').setLabel('⏭ スキップ').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ 停止').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Secondary));
+            new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ 停止').setStyle(ButtonStyle.Danger));
           await interaction.editReply({embeds:[new EmbedBuilder().setTitle('🎵 Music Player').setDescription(`**${track.title}**\n${track.url}\n\nVC: <#${vc.id}> / 担当: <@${sess.client.user.id}>`)],components:[controls]});
           if(!sess.playing)playNext(sess.key).catch(console.error);
-        }catch(e){
-          console.error('❌ /play 再生準備エラー:',e);
-          const detail=String(e?.message||e||'不明なエラー');
-          await interaction.editReply(`❌ 再生準備に失敗しました。\n\n${detail.slice(0,1800)}`);
-        }return;
+        }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
-      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);}return interaction.reply('⏹️ このVCの再生を停止しました。BOTはVCに残ります。');}
-      if (n === 'leave') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCに接続中の音楽BOTはありません。',ephemeral:true});destroyMusicSession(s);return interaction.reply('👋 音楽BOTをこのボイスチャンネルから退出させました。');}
+      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return interaction.reply('⏹️ このVCの再生を停止しました。');}
       if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return interaction.reply('⏸️ 一時停止しました。');}
       if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return interaction.reply('▶️ 再開しました。');}
       if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return interaction.reply(s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
@@ -2077,19 +1927,6 @@ AI生成機能は搭載していません。`
         return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
       }
       if (n === 'video') return interaction.reply(`🎬 ${interaction.options.getString('url',true)}`);
-    }
-
-    // 音楽プレイヤー操作ボタン
-    if(interaction.isButton() && interaction.customId.startsWith('music:')){
-      const action=interaction.customId.split(':')[1];
-      const vcId=interaction.member?.voice?.channelId;
-      const s=vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
-      if(!s)return interaction.reply({content:'❌ 音楽BOTと同じボイスチャンネルに参加してください。',ephemeral:true});
-      if(action==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
-      if(action==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
-      if(action==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
-      if(action==='stop'){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);return interaction.reply({content:'⏹️ 再生を停止しました。BOTはVCに残ります。',ephemeral:true});}
-      if(action==='leave'){destroyMusicSession(s);return interaction.reply({content:'👋 音楽BOTをこのボイスチャンネルから退出させました。',ephemeral:true});}
     }
 
     // 自動販売機 管理パネル操作
@@ -2447,23 +2284,25 @@ AI生成機能は搭載していません。`
         }
       }
       if (kind === 'music') {
-        const s=sessionForInteraction(interaction);
-        if(!s)return interaction.reply({content:'先に対象のボイスチャンネルへ参加してください。',ephemeral:true});
+        const s=players.get(interaction.guildId);
         if(a==='stop'){
-          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);
-          return interaction.reply({content:'⏹️ 再生を停止しました。BOTはVCに残ります。',ephemeral:true});
+          if(s){
+            s.queue.length=0;
+            try{s.ffmpeg?.kill();}catch{}
+            s.player.stop(true);
+            try{s.connection.destroy();}catch{}
+            players.delete(s.key);
+          }
+          return interaction.reply({content:'⏹️ 再生を停止しました。',ephemeral:true});
         }
-        if(a==='leave'){
-          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
-          return interaction.reply({content:'👋 音楽BOTをVCから退出させました。',ephemeral:true});
-        }
+        if(!s)return interaction.reply({content:'現在再生中の音楽はありません。',ephemeral:true});
         if(a==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
         if(a==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
         if(a==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
       }
 
       if (kind === 'ticket' && a === 'create') {
-        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+        await interaction.deferReply({ephemeral:true});
         const g=guildData(store,interaction.guildId);
         const overwrites=[
           {id:interaction.guild.id,deny:[PermissionFlagsBits.ViewChannel]},
