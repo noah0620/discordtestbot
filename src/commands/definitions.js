@@ -301,7 +301,6 @@ export const commandData = [
   new SlashCommandBuilder().setName('queue').setDescription('現在のVCの音楽キュー'),
   new SlashCommandBuilder().setName('skip').setDescription('現在曲をスキップ'),
   new SlashCommandBuilder().setName('stop').setDescription('現在のVCの音楽停止'),
-  new SlashCommandBuilder().setName('leave').setDescription('音楽BOTを現在のボイスチャンネルから退出'),
   new SlashCommandBuilder().setName('pause').setDescription('音楽を一時停止'),
   new SlashCommandBuilder().setName('resume').setDescription('音楽を再開'),
   new SlashCommandBuilder().setName('nowplaying').setDescription('現在再生中を表示'),
