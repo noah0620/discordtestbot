@@ -695,6 +695,24 @@ function rolePanelProblem(guild, role) {
 }
 
 client.on(Events.InteractionCreate, async interaction => {
+  // Slash command はDiscordの3秒制限より先に即時ACKする。
+  // /play の検索やVC接続より前に実行することで Unknown interaction(10062) を防ぐ。
+  if(interaction.isChatInputCommand() && !interaction.deferred && !interaction.replied){
+    try{
+      if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
+    }catch(ackError){
+      if(ackError?.code===10062){
+        console.warn('⚠️ Interaction 10062: 応答期限切れ/別インスタンス処理済みのため、この操作を終了します。');
+        return;
+      }
+      if(ackError?.code===40060){
+        console.warn('⚠️ Interaction 40060: すでに応答済みのため処理を継続します。');
+      }else{
+        throw ackError;
+      }
+    }
+  }
+
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
   try {
     if (interaction.isAutocomplete()) {
@@ -1285,7 +1303,7 @@ AI生成機能は搭載していません。`
         g.weatherRegions=[...new Set(regions)]; g.weatherChannelId=ch.id; g.weatherChannelRoutes={}; g.weatherAutoTime=time; g.weatherAutoEnabled=enabled; g.lastWeatherPostDate=null; g.weatherLastSentByChannel={};
         g.weatherSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1304,7 +1322,7 @@ AI生成機能は搭載していません。`
         g.earthquakeRegions=regions; g.earthquakeChannelId=ch.id; g.minIntensity=min; g.earthquakeAutoEnabled=enabled;
         g.earthquakeSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1555,7 +1573,7 @@ AI生成機能は搭載していません。`
         const username=socialUsername('twitter',input);
         if(platform!=='twitter'||!username||!/^\w{1,15}$/.test(username))return interaction.reply({content:'❌ XのプロフィールURL（https://x.com/ユーザー名）を指定してください。',ephemeral:true});
         if(!channel?.isTextBased())return interaction.reply({content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const resolved=await resolveSocialFeedAuto('twitter',input);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',input)):await rssParser.parseURL(resolved.feedUrl);
@@ -1589,7 +1607,7 @@ AI生成機能は搭載していません。`
           source.channelId=channel.id;saveStore(store);
           return interaction.reply({content:`✅ X監視 #${id} の投稿先を ${channel} に変更しました。`,ephemeral:true});
         }
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 最新投稿が取得できませんでした。');
@@ -1625,7 +1643,7 @@ AI生成機能は搭載していません。`
         if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのURLではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
         if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定したDiscordチャンネルへ投稿できません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const resolved=await resolveSocialFeedAuto(platform,profileUrl);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',profileUrl)):await rssParser.parseURL(resolved.feedUrl);
@@ -1660,7 +1678,7 @@ AI生成機能は搭載していません。`
       if (n === 'social-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.socialSources.find(x=>x.id===id);
         if(!source)return interaction.reply({content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 投稿を取得できません。');
@@ -1681,7 +1699,7 @@ AI生成機能は搭載していません。`
         if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのチャンネルではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
         if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定チャンネルへ投稿できません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         let feed;
         try{feed=await fetchNewsFeed({feedUrl});}catch(e){console.error(e);return interaction.editReply('❌ フィードを取得できません。通常の記事URLではなくRSS/Atom URLを指定してください。');}
         const id=g.nextNewsSourceId++;
@@ -1708,7 +1726,7 @@ AI生成機能は搭載していません。`
       if (n === 'news-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.newsSources.find(x=>x.id===id);
         if(!source)return interaction.reply({content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const feed=await fetchNewsFeed(source),item=feed.items?.[0];if(!item)return interaction.editReply('❌ 記事がありません。');
           const ch=interaction.guild.channels.cache.get(source.channelId)||await interaction.guild.channels.fetch(source.channelId).catch(()=>null);
@@ -1737,7 +1755,7 @@ AI生成機能は搭載していません。`
           });
         }
 
-        await interaction.deferReply();
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         const pages=await buildWeatherPages(regions);
         return replyWeatherPages(interaction,pages);
       }
@@ -1970,7 +1988,7 @@ AI生成機能は搭載していません。`
       }
 
       if (n === 'earthquake') {
-        await interaction.deferReply();return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
       }
       if (n === 'earthquake-register') {
         const g=guildData(store,interaction.guildId),r=interaction.options.getString('region',true),min=interaction.options.getInteger('min_intensity');
@@ -2026,7 +2044,7 @@ AI生成機能は搭載していません。`
       if (n === 'play') {
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
         if(!vc)return interaction.reply({content:'❌ 先にボイスチャンネルへ参加してください。',ephemeral:true});
-        await interaction.deferReply();
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         try{
           const track=await resolveMusicTrack(input);const sess=await createMusicSession(interaction,vc);
           sess.queue.push({...track,requesterId:interaction.user.id});
@@ -2445,7 +2463,7 @@ AI生成機能は搭載していません。`
       }
 
       if (kind === 'ticket' && a === 'create') {
-        await interaction.deferReply({ephemeral:true});
+        if(!interaction.deferred && !interaction.replied) await interaction.deferReply();
         const g=guildData(store,interaction.guildId);
         const overwrites=[
           {id:interaction.guild.id,deny:[PermissionFlagsBits.ViewChannel]},
