@@ -19,6 +19,66 @@ import fsSync from 'node:fs';
 import Parser from 'rss-parser';
 import sharp from 'sharp';
 import PDFDocument from 'pdfkit';
+import { commandData } from './commands/definitions.js';
+
+const HELP_CATEGORIES = [
+  { id:'basic', label:'基本・BOT管理', emoji:'🤖', test:n=>['help','supportchannel','ping','owner-status','bot-restart','admin-role-set','admin-role-remove','admin-role-status','diagnostics'].includes(n) },
+  { id:'shop', label:'自販機・商品・注文', emoji:'🛒', test:n=>/^(shop-|product-|order-)/.test(n) },
+  { id:'verify', label:'認証・参加退出', emoji:'✅', test:n=>/^(verify-|join-leave-|welcome-)/.test(n) },
+  { id:'role', label:'ロール管理', emoji:'🎭', test:n=>/^role-/.test(n) },
+  { id:'ticket', label:'チケット', emoji:'🎫', test:n=>/^ticket-/.test(n) },
+  { id:'auto', label:'自動返信・予約・モデレーション', emoji:'💬', test:n=>/^(autoreply-|schedule-|moderation-)/.test(n) },
+  { id:'guild', label:'サーバー設定', emoji:'⚙️', test:n=>/^(guild-|setting$)/.test(n) },
+  { id:'social', label:'SNS・RSS・メディア', emoji:'📡', test:n=>/^(social-|latest-|x-|rsshub-|media-)/.test(n) },
+  { id:'news', label:'ニュース', emoji:'📰', test:n=>/^news-/.test(n) },
+  { id:'weather', label:'天気・地震', emoji:'🌤️', test:n=>/^(weather|earthquake)/.test(n) },
+  { id:'music', label:'音楽・SNSダウンロード', emoji:'🎵', test:n=>['play','queue','skip','stop','pause','resume','nowplaying','volume','music-stats','download'].includes(n) },
+  { id:'image', label:'画像・動画ツール', emoji:'🖼️', test:n=>n==='image' },
+];
+
+function helpCommandLines(categoryId){
+  const cat=HELP_CATEGORIES.find(c=>c.id===categoryId);
+  if(!cat)return [];
+  const lines=[];
+  for(const builder of commandData){
+    const j=builder.toJSON();
+    if(!cat.test(j.name))continue;
+    const subs=(j.options||[]).filter(o=>o.type===1);
+    if(subs.length){
+      for(const sc of subs) lines.push(`**/${j.name} ${sc.name}**\n${sc.description || j.description || '説明なし'}`);
+    }else{
+      lines.push(`**/${j.name}**\n${j.description || '説明なし'}`);
+    }
+  }
+  return lines;
+}
+
+function helpMenuRow(selected){
+  const options=HELP_CATEGORIES.map(c=>({
+    label:c.label, value:c.id, emoji:c.emoji,
+    description:`${helpCommandLines(c.id).length}件のコマンド詳細`,
+    default:c.id===selected
+  }));
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId('help_category').setPlaceholder('カテゴリを選択してコマンド詳細を表示').addOptions(options)
+  );
+}
+
+function helpCategoryEmbeds(categoryId){
+  const cat=HELP_CATEGORIES.find(c=>c.id===categoryId) || HELP_CATEGORIES[0];
+  const lines=helpCommandLines(cat.id);
+  const chunks=[]; let current='';
+  for(const line of lines){
+    const add=(current?'\n\n':'')+line;
+    if((current+add).length>3600){ chunks.push(current); current=line; } else current+=add;
+  }
+  if(current)chunks.push(current);
+  return chunks.slice(0,3).map((chunk,i)=>new EmbedBuilder()
+    .setTitle(i===0 ? `匿名N（のあBOT） コマンド詳細表示` : `${cat.emoji} ${cat.label}（続き）`)
+    .setDescription(i===0 ? `${cat.emoji} **${cat.label}**\n\n${chunk}` : chunk)
+    .setFooter({text:`登録済みコマンドから自動生成 • ${lines.length}件`})
+  );
+}
 
 assertConfig();
 const store = loadStore();
@@ -814,64 +874,15 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (n === 'supportchannel') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
       if (n === 'help') {
+        const total=commandData.length;
+        const summary=HELP_CATEGORIES.map(c=>`${c.emoji} **${c.label}** — ${helpCommandLines(c.id).length}件`).join('\n');
         return interaction.reply({
           embeds:[new EmbedBuilder()
-            .setTitle('🤖 Discord MultiBot v5.0 完全統合版')
-            .setDescription(
-`1. 🛒 **自販機・商品・PayPay購入・在庫・管理者**
-/shop-create /shop-list /shop-config /shop-delete /shop-admin
-/product-add /product-list /product-edit /product-remove /order-list /shop-panel
-
-2. ✅ **管理者承認型認証・認証管理ページ**
-/verify-panel /verify-admin /verify-status /verify-settings
-
-3. 🎭 **ロール無制限・自動ページ分割パネル**
-/role-panel /role-add /role-list /role-remove
-
-4. 🚪 **入室・退出通知と設定確認**
-/join-leave-settings /join-leave-status /guild-settings /guild-status /setting
-
-5. 🎫 **チケット**
-/ticket-panel /ticket-settings /ticket-status
-
-6. 💬 **自動返信**
-/autoreply-add /autoreply-remove /autoreply-list
-
-7. 📢 **予約投稿・自動削除**
-/schedule-post /schedule-list /schedule-cancel
-
-8. 🛡️ **モデレーション**
-/moderation-rule /moderation-list /moderation-remove
-
-9. 📡 **SNS最新情報**
-/social-source-add /social-source-remove /social-list /social-test
-
-10. 📰 **NEWS ALERTS**
-/news-source-add /news-source-remove /news-list /news-auto /news-test
-
-10. 🌤️ **47都道府県・地方・全国・複数地域天気**
-/weather /weather-register /weather-list /weather-admin /weather-auto /weather-channel /weather-channel-remove
-
-10. 🚨 **天気とは独立した地震速報**
-/earthquake /earthquake-register /earthquake-list /earthquake-auto
-
-11. 🎵 **VC音楽**
-/play /queue /pause /resume /skip /stop /nowplaying /volume
-/download（YouTube / X / TikTok / Instagram → MP4 / MP3）
-
-12. 👑 **管理者権限**
-/owner-status /admin-role-set /admin-role-status
-
-🔧 **動作診断**
-/diagnostics
-
-🆘 サポート: https://discord.gg/KGhYc6cWmq
-
-補助: /video
-AI生成機能は搭載していません。`
-            )
+            .setTitle('匿名N（のあBOT） コマンド詳細表示')
+            .setDescription(`現在BOTに登録されているコマンドをカテゴリ別に確認できます。\n下のメニューからカテゴリを選ぶと、**コマンド名＋詳細説明**を表示します。\n\n${summary}\n\n**トップレベル登録数: ${total}件**`)
+            .setFooter({text:'コマンド追加・変更時も登録定義から自動反映'})
           ],
-          components:[new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary))],
+          components:[helpMenuRow(null),new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary))],
           ephemeral:true
         });
       }
@@ -2264,6 +2275,11 @@ AI生成機能は搭載していません。`
       if(action==='orderchannel')shop.orderChannelId=ch.id;
       if(action==='saleschannel')shop.salesChannelId=ch.id;
       saveStore(store);return interaction.update({content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId==='help_category') {
+      const categoryId=interaction.values[0];
+      return interaction.update({embeds:helpCategoryEmbeds(categoryId),components:[helpMenuRow(categoryId),new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary))]});
     }
 
     if (interaction.isButton() && interaction.customId==='support_help') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
