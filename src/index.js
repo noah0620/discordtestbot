@@ -102,11 +102,21 @@ function buildHelpPage(pageIndex=0){
 }
 
 async function sendHelp(interaction){
-  // 先に応答を確保し、1メッセージ内でページを切り替える。
-  await interaction.deferReply({ephemeral:true});
+  // /help はページ生成が軽量なので deferReply() せず即時応答する。
+  // これにより同一Interactionへの二重ACK (Discord 40060) を防ぐ。
   const page=buildHelpPage(0);
-  if(!page)return interaction.editReply({content:'現在表示できるコマンドがありません。'});
-  return interaction.editReply({embeds:[page.embed],components:[page.navRow]});
+  const payload=page
+    ? {embeds:[page.embed],components:[page.navRow],ephemeral:true}
+    : {content:'現在表示できるコマンドがありません。',ephemeral:true};
+
+  if(interaction.deferred){
+    const {ephemeral,...editPayload}=payload;
+    return interaction.editReply(editPayload);
+  }
+  if(interaction.replied){
+    return interaction.followUp(payload);
+  }
+  return interaction.reply(payload);
 }
 
 assertConfig();
