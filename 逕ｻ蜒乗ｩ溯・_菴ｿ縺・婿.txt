@@ -1,24 +1,8 @@
-【追加した画像機能】
+画像ツール（Discordコマンド）
 
-/image-bg-remove
-  画像を添付 → AIで背景を透過 → PNGで返します。
-  初回実行時は背景除去AIモデルの準備に時間がかかる場合があります。
+/image compress image:<画像>  画像を5MB以下に自動圧縮
+/image bg-remove image:<画像>  背景透過PNG
+/image pdf image:<画像>        画像をPDF変換
+/image enhance image:<画像> scale:2倍/4倍  高画質化・拡大
 
-/image-pdf
-  JPG / PNG / WebP / GIF / AVIF画像を添付 → PDFへ変換します。
-
-/image-enhance
-  画像を添付 → 2倍または4倍へ高品質リサイズ＋シャープ処理 → PNGで返します。
-  ※これは補間・シャープによる高画質化で、存在しない細部をAIで復元する超解像ではありません。
-
-【更新後】
-1. npm install
-2. npm run deploy-commands
-3. npm start
-
-既存の /download（SNS MP4/MP3）などは残しています。
-
-
-【画像を5MB以下に圧縮】
-/image-compress image:<画像>
-5MBを超える画像を画質優先で自動調整し、5MB以下のJPEGとして返します。すでに5MB以下なら再圧縮せず返します。入力上限は50MBです。
+Discordのトップレベルスラッシュコマンド上限（100個）に対応するため、画像機能は /image 配下へ統合しています。

@@ -2053,33 +2053,37 @@ AI生成機能は搭載していません。`
         if(type==='all'||type==='tracks'){const tracks=Object.values(st.tracks||{}).sort((a,b)=>(b.plays||0)-(a.plays||0)).slice(0,10);parts.push(`🎶 **人気曲**\n${tracks.length?tracks.map((t,i)=>`${i+1}. ${t.title} — ${t.plays}回`).join('\n'):'まだ統計がありません。'}`);}
         return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
       }
-      if (n === 'image-compress') {
-        const att=interaction.options.getAttachment('image',true);
-        return sendImageResult(interaction,async dir=>{
-          const b=await fetchAttachmentBuffer(att,50);
-          const originalExt=(path.extname(att.name||'')||'.jpg').toLowerCase();
-          const alreadySmall=b.length<=5*1024*1024;
-          const out=path.join(dir,alreadySmall?`compressed${originalExt}`:'compressed.jpg');
-          const info=await compressImageTo5Mb(b,out);
-          const mb=(info.size/1024/1024).toFixed(2);
-          return {path:out,name:`${path.parse(att.name||'image').name}_5MB${alreadySmall?originalExt:'.jpg'}`,message:info.unchanged?`元画像はすでに5MB以下です（${mb}MB）`:`${mb}MBまで圧縮しました`};
-        },'画像5MB圧縮');
-      }
-      if (n === 'image-bg-remove') {
-        const att=interaction.options.getAttachment('image',true);
-        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'background_removed.png');await removeImageBackground(b,out);return {path:out,name:`${path.parse(att.name||'image').name}_transparent.png`};},'背景透過');
-      }
-      if (n === 'image-pdf') {
-        const att=interaction.options.getAttachment('image',true);
-        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'converted.pdf');await imageToPdf(b,out);return {path:out,name:`${path.parse(att.name||'image').name}.pdf`};},'PDF変換');
-      }
-      if (n === 'image-enhance') {
-        const att=interaction.options.getAttachment('image',true),scale=interaction.options.getInteger('scale',true);
-        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'enhanced.png');await enhanceImage(b,out,scale);return {path:out,name:`${path.parse(att.name||'image').name}_${scale}x.png`};},`画像高画質化（${scale}倍）`);
+      if (n === 'image') {
+        const sub=interaction.options.getSubcommand(true);
+        if (sub === 'compress') {
+          const att=interaction.options.getAttachment('image',true);
+          return sendImageResult(interaction,async dir=>{
+            const b=await fetchAttachmentBuffer(att,50);
+            const originalExt=(path.extname(att.name||'')||'.jpg').toLowerCase();
+            const alreadySmall=b.length<=5*1024*1024;
+            const out=path.join(dir,alreadySmall?`compressed${originalExt}`:'compressed.jpg');
+            const info=await compressImageTo5Mb(b,out);
+            const mb=(info.size/1024/1024).toFixed(2);
+            return {path:out,name:`${path.parse(att.name||'image').name}_5MB${alreadySmall?originalExt:'.jpg'}`,message:info.unchanged?`元画像はすでに5MB以下です（${mb}MB）`:`${mb}MBまで圧縮しました`};
+          },'画像5MB圧縮');
+        }
+        if (sub === 'bg-remove') {
+          const att=interaction.options.getAttachment('image',true);
+          return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'background_removed.png');await removeImageBackground(b,out);return {path:out,name:`${path.parse(att.name||'image').name}_transparent.png`};},'背景透過');
+        }
+        if (sub === 'pdf') {
+          const att=interaction.options.getAttachment('image',true);
+          return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'converted.pdf');await imageToPdf(b,out);return {path:out,name:`${path.parse(att.name||'image').name}.pdf`};},'PDF変換');
+        }
+        if (sub === 'enhance') {
+          const att=interaction.options.getAttachment('image',true),scale=interaction.options.getInteger('scale',true);
+          return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'enhanced.png');await enhanceImage(b,out,scale);return {path:out,name:`${path.parse(att.name||'image').name}_${scale}x.png`};},`画像高画質化（${scale}倍）`);
+        }
       }
       if (n === 'download') {
         const url=interaction.options.getString('url',true);
         const format=interaction.options.getString('format',true);
+        if(format==='link') return interaction.reply(`🎬 ${url}`);
         if(!supportedDownloadUrl(url)){
           return interaction.reply({content:'❌ 対応URLは YouTube / X / TikTok / Instagram の投稿URLです。',ephemeral:true});
         }
@@ -2089,20 +2093,16 @@ AI生成機能は搭載していません。`
           result=await downloadSocialMedia(url,format);
           const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
           if(result.size>maxBytes){
-            return interaction.editReply(`❌ 変換は完了しましたが、ファイルが ${(result.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定（${process.env.DISCORD_UPLOAD_MAX_MB||10}MB）を超えています。\
-.env の DISCORD_UPLOAD_MAX_MB は、実際に利用できるDiscord添付上限に合わせて変更できます。`);
+            return interaction.editReply(`❌ 変換は完了しましたが、ファイルが ${(result.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定（${process.env.DISCORD_UPLOAD_MAX_MB||10}MB）を超えています。\n.env の DISCORD_UPLOAD_MAX_MB は、実際に利用できるDiscord添付上限に合わせて変更できます。`);
           }
           return interaction.editReply({content:`✅ ${format.toUpperCase()} 変換完了`,files:[{attachment:result.filePath,name:result.fileName}]});
         }catch(e){
           console.error('download command failed:',e);
-          return interaction.editReply(`❌ 取得・変換に失敗しました。\
-非公開/年齢制限/ログイン必須投稿、サービス側の仕様変更などでは取得できない場合があります。\
-${String(e.message||e).slice(0,700)}`);
+          return interaction.editReply(`❌ 取得・変換に失敗しました。\n非公開/年齢制限/ログイン必須投稿、サービス側の仕様変更などでは取得できない場合があります。\n${String(e.message||e).slice(0,700)}`);
         }finally{
           if(result?.dir)setTimeout(()=>fs.rm(result.dir,{recursive:true,force:true}).catch(()=>{}),30_000);
         }
       }
-      if (n === 'video') return interaction.reply(`🎬 ${interaction.options.getString('url',true)}`);
     }
 
     // 自動販売機 管理パネル操作
