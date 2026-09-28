@@ -92,10 +92,10 @@ function buildHelpPage(pageIndex=0){
     .setFooter({text:`📖 ${index+1} / ${pages.length}ページ • ${page.commandCount}件 • コマンド定義から自動生成`});
 
   const navRow=new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('help_page:0').setLabel('⏮ 最初').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
-    new ButtonBuilder().setCustomId(`help_page:${Math.max(0,index-1)}`).setLabel('◀ 前へ').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
-    new ButtonBuilder().setCustomId(`help_page:${Math.min(pages.length-1,index+1)}`).setLabel('次へ ▶').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
-    new ButtonBuilder().setCustomId(`help_page:${pages.length-1}`).setLabel('最後 ⏭').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
+    new ButtonBuilder().setCustomId('help_first:0').setLabel('⏮ 最初').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
+    new ButtonBuilder().setCustomId(`help_prev:${Math.max(0,index-1)}`).setLabel('◀ 前へ').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
+    new ButtonBuilder().setCustomId(`help_next:${Math.min(pages.length-1,index+1)}`).setLabel('次へ ▶').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
+    new ButtonBuilder().setCustomId(`help_last:${pages.length-1}`).setLabel('最後 ⏭').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
     new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary)
   );
   return {embed,navRow,index,total:pages.length};
@@ -2322,7 +2322,7 @@ client.on(Events.InteractionCreate, async interaction => {
       saveStore(store);return interaction.update({content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith('help_page:')) {
+    if (interaction.isButton() && /^(help_first|help_prev|help_next|help_last):/.test(interaction.customId)) {
       // Discordの3秒制限内に即時更新。重い処理は行わない。
       const requested=Number(interaction.customId.split(':')[1] || 0);
       const page=buildHelpPage(requested);
