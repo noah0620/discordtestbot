@@ -1,0 +1,9 @@
+Discord MultiBot v6.0.8 /help 表示修正
+
+・/help を従来の番号付きカテゴリ一覧形式へ変更
+・各コマンド名の直下に詳細説明を表示
+・タイトル: 匿名N（のあBOT） コマンド詳細表示
+・/help のカテゴリ選択プルダウンを廃止
+・Interactionを先にdeferReplyして Unknown interaction (10062) を防止
+・Discord Embedの文字数上限に合わせて自動的に複数メッセージへ分割
+・登録済み commandData から自動生成するため追加済みコマンドも反映

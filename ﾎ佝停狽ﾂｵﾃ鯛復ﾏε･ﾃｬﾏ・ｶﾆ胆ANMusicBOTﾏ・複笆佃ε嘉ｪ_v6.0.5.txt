@@ -1,0 +1,20 @@
+Discord MultiBot v6.0.5 - ANMusicBOT音楽再生統合版
+
+【統合内容】
+・ANMusicBOT_公開用_グローバルコマンド版 の音楽再生方式をMultiBotへ統合
+・play-dlでYouTube検索/URL情報取得
+・youtube-dl-exec (yt-dlp) で再生直前に最新音声URLを取得
+・FFmpeg再接続オプション追加
+・キュー待ちによる音声URL期限切れ対策
+・VC無人時に15秒監視＋VoiceStateUpdateで自動退出
+・再生操作ボタン: 一時停止 / 再開 / スキップ / 停止 / 退出
+・既存の複数音楽BOT対応と音楽統計を維持
+・画像/SNS/自販機等の既存MultiBot機能を維持
+
+【導入】
+1. npm install
+2. npm run deploy-commands
+3. npm start
+
+cookies.txtを使用する場合はプロジェクトルートへ配置してください。
+YOUTUBE_COOKIE環境変数で別パスも指定できます。

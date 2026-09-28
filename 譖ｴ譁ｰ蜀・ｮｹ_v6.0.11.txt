@@ -1,0 +1,17 @@
+Discord MultiBot v6.0.11
+
+・/era search の登録確認を強化
+・deploy-commands 実行時に /era がローカル定義に存在するか確認
+・Discord API登録後にコマンド一覧を再取得し /era search の存在を検証
+・トップレベルコマンド数は98個のまま（100個上限以内）
+・/help ページ切替機能は維持
+
+実行:
+npm install
+npm run deploy-commands
+npm start
+
+正常時の目印:
+📅 /era 登録対象: ✅ YES
+🔎 Discord側 /era: ✅ 登録済み
+/era サブコマンド: search

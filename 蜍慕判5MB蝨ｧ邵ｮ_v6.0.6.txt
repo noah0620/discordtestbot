@@ -1,0 +1,12 @@
+動画5MB圧縮機能
+
+Discordコマンド: /image video-compress
+対応: MP4 / MOV / WebM / MKV / AVI / M4V
+入力上限: 100MB
+出力: MP4（5MB以下を目標に自動圧縮）
+FFmpegで動画時間に応じてビットレート・解像度を自動調整します。
+
+導入後:
+1. npm install
+2. npm run deploy-commands
+3. npm start
