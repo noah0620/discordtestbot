@@ -1,0 +1,19 @@
+【追加した画像機能】
+
+/image-bg-remove
+  画像を添付 → AIで背景を透過 → PNGで返します。
+  初回実行時は背景除去AIモデルの準備に時間がかかる場合があります。
+
+/image-pdf
+  JPG / PNG / WebP / GIF / AVIF画像を添付 → PDFへ変換します。
+
+/image-enhance
+  画像を添付 → 2倍または4倍へ高品質リサイズ＋シャープ処理 → PNGで返します。
+  ※これは補間・シャープによる高画質化で、存在しない細部をAIで復元する超解像ではありません。
+
+【更新後】
+1. npm install
+2. npm run deploy-commands
+3. npm start
+
+既存の /download（SNS MP4/MP3）などは残しています。

@@ -20,6 +20,9 @@
     "opusscript": "^0.1.1",
     "libsodium-wrappers": "^0.7.15",
     "rss-parser": "^3.13.0",
-    "youtube-dl-exec": "^3.1.15"
+    "youtube-dl-exec": "^3.1.15",
+    "sharp": "^0.34.4",
+    "pdfkit": "^0.17.2",
+    "@imgly/background-removal-node": "^1.7.0"
   }
 }

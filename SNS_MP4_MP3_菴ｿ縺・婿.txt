@@ -1,0 +1,25 @@
+SNS MP4 / MP3 ダウンロード機能
+
+対応URL:
+- YouTube
+- X (Twitter)
+- TikTok
+- Instagram
+
+コマンド:
+/download url:<投稿URL> format:<MP4 または MP3>
+
+初回/更新手順:
+1. このフォルダで npm install
+2. .env を既存BOTから引き継ぐ
+3. npm run deploy-commands
+4. npm start
+
+.env 任意設定:
+DISCORD_UPLOAD_MAX_MB=10
+DOWNLOAD_MAX_SIZE=24M
+
+注意:
+- 自分の投稿、または保存・利用の許可があるコンテンツに使用してください。
+- 非公開、ログイン必須、年齢制限などの投稿は取得できない場合があります。
+- Discordに送信できるファイルサイズを超える場合はエラー表示します。

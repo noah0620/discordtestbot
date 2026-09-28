@@ -300,8 +300,7 @@ export const commandData = [
     .addStringOption(o=>o.setName('query').setDescription('曲名 / YouTube等のURL').setRequired(true)),
   new SlashCommandBuilder().setName('queue').setDescription('現在のVCの音楽キュー'),
   new SlashCommandBuilder().setName('skip').setDescription('現在曲をスキップ'),
-  new SlashCommandBuilder().setName('stop').setDescription('現在のVCの音楽停止（BOTはVCに残る）'),
-  new SlashCommandBuilder().setName('leave').setDescription('音楽BOTを現在のVCから退出させる'),
+  new SlashCommandBuilder().setName('stop').setDescription('現在のVCの音楽停止'),
   new SlashCommandBuilder().setName('pause').setDescription('音楽を一時停止'),
   new SlashCommandBuilder().setName('resume').setDescription('音楽を再開'),
   new SlashCommandBuilder().setName('nowplaying').setDescription('現在再生中を表示'),
@@ -310,6 +309,20 @@ export const commandData = [
   new SlashCommandBuilder().setName('music-stats').setDescription('音楽の再生統計を表示')
     .addStringOption(o=>o.setName('type').setDescription('表示内容').addChoices({name:'よく聴いているユーザー',value:'users'},{name:'人気曲',value:'tracks'},{name:'全体',value:'all'})),
 
+  new SlashCommandBuilder().setName('image-bg-remove').setDescription('画像の背景をAIで透過してPNGに変換')
+    .addAttachmentOption(o=>o.setName('image').setDescription('背景を透過する画像').setRequired(true)),
+  new SlashCommandBuilder().setName('image-pdf').setDescription('画像ファイルをPDFに変換')
+    .addAttachmentOption(o=>o.setName('image').setDescription('PDFに変換する画像').setRequired(true)),
+  new SlashCommandBuilder().setName('image-enhance').setDescription('画像を高画質化・拡大')
+    .addAttachmentOption(o=>o.setName('image').setDescription('高画質化する画像').setRequired(true))
+    .addIntegerOption(o=>o.setName('scale').setDescription('拡大倍率').setRequired(true).addChoices(
+      {name:'2倍',value:2},{name:'4倍',value:4}
+    )),
+  new SlashCommandBuilder().setName('download').setDescription('許可されたSNS動画をMP4/MP3で取得')
+    .addStringOption(o=>o.setName('url').setDescription('YouTube / X / TikTok / Instagram の投稿URL').setRequired(true))
+    .addStringOption(o=>o.setName('format').setDescription('保存形式').setRequired(true).addChoices(
+      {name:'MP4（動画）',value:'mp4'},{name:'MP3（音声）',value:'mp3'}
+    )),
   new SlashCommandBuilder().setName('video').setDescription('動画URLを投稿')
     .addStringOption(o=>o.setName('url').setDescription('動画URL').setRequired(true))
 ];

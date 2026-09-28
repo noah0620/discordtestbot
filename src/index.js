@@ -3,15 +3,20 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
   TextInputBuilder, TextInputStyle, ChannelType, PermissionFlagsBits, StringSelectMenuBuilder, ChannelSelectMenuBuilder
 } from 'discord.js';
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType } from '@discordjs/voice';
 import { config, assertConfig, isBotOwner, isBotOwnerUser } from './config.js';
 import { loadStore, saveStore, guildData } from './db/store.js';
 import { searchRegionChoices, searchPrefectureChoices, PREFECTURES, WEATHER_AREAS, expandWeatherRegion } from './regions.js';
 import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
 import Parser from 'rss-parser';
 import youtubedl from 'youtube-dl-exec';
+import sharp from 'sharp';
+import PDFDocument from 'pdfkit';
 
 assertConfig();
 const store = loadStore();
@@ -65,6 +70,101 @@ function validHttpUrl(value){
   }catch{return false;}
 }
 
+
+const SUPPORTED_DOWNLOAD_HOSTS = new Set([
+  'youtube.com','www.youtube.com','m.youtube.com','youtu.be',
+  'x.com','www.x.com','twitter.com','www.twitter.com',
+  'tiktok.com','www.tiktok.com','vm.tiktok.com','vt.tiktok.com',
+  'instagram.com','www.instagram.com'
+]);
+function supportedDownloadUrl(value){
+  try {
+    const u=new URL(value);
+    return u.protocol==='https:' && SUPPORTED_DOWNLOAD_HOSTS.has(u.hostname.toLowerCase());
+  } catch { return false; }
+}
+function safeMediaName(value){
+  return String(value||'media').replace(/[\\/:*?\"<>|\\x00-\\x1f]/g,'_').replace(/\\s+/g,' ').trim().slice(0,80)||'media';
+}
+async function downloadSocialMedia(url,format){
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'discord-media-'));
+  const id=randomUUID();
+  const output=path.join(dir,`${id}.%(ext)s`);
+  const common={
+    noPlaylist:true,noWarnings:true,restrictFilenames:true,
+    output,ffmpegLocation:ffmpegPath,
+    maxFilesize:process.env.DOWNLOAD_MAX_SIZE||'24M'
+  };
+  try {
+    const info=await youtubedl(url,{dumpSingleJson:true,noPlaylist:true,skipDownload:true,noWarnings:true});
+    const title=safeMediaName(info?.title||'media');
+    if(format==='mp3'){
+      await youtubedl(url,{...common,extractAudio:true,audioFormat:'mp3',audioQuality:'0',format:'bestaudio/best'});
+    }else{
+      await youtubedl(url,{...common,format:'bv*+ba/b',mergeOutputFormat:'mp4',recodeVideo:'mp4'});
+    }
+    const files=await fs.readdir(dir);
+    const wanted=files.find(x=>x.startsWith(id+'.') && x.endsWith('.'+format));
+    if(!wanted)throw new Error(`${format.toUpperCase()}ファイルを作成できませんでした。`);
+    const filePath=path.join(dir,wanted);
+    const stat=await fs.stat(filePath);
+    return {dir,filePath,fileName:`${title}.${format}`,size:stat.size};
+  }catch(error){
+    await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});
+    throw error;
+  }
+}
+
+const IMAGE_TYPES = new Set(['image/jpeg','image/png','image/webp','image/gif','image/avif']);
+function validImageAttachment(att){
+  return Boolean(att && (IMAGE_TYPES.has(String(att.contentType||'').toLowerCase()) || /\.(jpe?g|png|webp|gif|avif)$/i.test(att.name||'')));
+}
+async function fetchAttachmentBuffer(att,maxMb=20){
+  if(!validImageAttachment(att))throw new Error('JPG / PNG / WebP / GIF / AVIF の画像を指定してください。');
+  if(att.size && att.size>maxMb*1024*1024)throw new Error(`画像サイズは${maxMb}MB以下にしてください。`);
+  const r=await fetch(att.url);
+  if(!r.ok)throw new Error(`画像を取得できませんでした (${r.status})`);
+  const b=Buffer.from(await r.arrayBuffer());
+  if(b.length>maxMb*1024*1024)throw new Error(`画像サイズは${maxMb}MB以下にしてください。`);
+  return b;
+}
+async function makeTempImageDir(){return fs.mkdtemp(path.join(os.tmpdir(),'discord-image-'));}
+async function imageToPdf(buffer,outPath){
+  const normalized=await sharp(buffer,{animated:false}).rotate().jpeg({quality:95}).toBuffer();
+  const meta=await sharp(normalized).metadata();
+  const w=meta.width||595,h=meta.height||842;
+  const portrait=h>=w;
+  const page=portrait?[595.28,841.89]:[841.89,595.28];
+  await new Promise((resolve,reject)=>{
+    const doc=new PDFDocument({autoFirstPage:false,margin:0});
+    const chunks=[];doc.on('data',c=>chunks.push(c));doc.on('error',reject);
+    doc.on('end',()=>fs.writeFile(outPath,Buffer.concat(chunks)).then(resolve,reject));
+    doc.addPage({size:page,margin:0});
+    doc.image(normalized,0,0,{fit:page,align:'center',valign:'center'});doc.end();
+  });
+}
+async function enhanceImage(buffer,outPath,scale){
+  const img=sharp(buffer,{animated:false}).rotate();const meta=await img.metadata();
+  const width=Math.min((meta.width||1)*scale,12000),height=Math.min((meta.height||1)*scale,12000);
+  await img.resize({width,height,fit:'fill',kernel:sharp.kernel.lanczos3}).sharpen({sigma:1}).png({compressionLevel:6}).toFile(outPath);
+}
+async function removeImageBackground(buffer,outPath){
+  const {removeBackground}=await import('@imgly/background-removal-node');
+  const input=new Blob([buffer],{type:'image/png'});
+  const result=await removeBackground(input,{output:{format:'image/png',quality:1}});
+  await fs.writeFile(outPath,Buffer.from(await result.arrayBuffer()));
+}
+async function sendImageResult(interaction,work,label){
+  await interaction.deferReply({ephemeral:true});let dir=null;
+  try{
+    dir=await makeTempImageDir();const result=await work(dir);const st=await fs.stat(result.path);
+    const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
+    if(st.size>maxBytes)return interaction.editReply(`❌ 処理は完了しましたが、出力ファイルが ${(st.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定を超えています。`);
+    return interaction.editReply({content:`✅ ${label} 完了`,files:[{attachment:result.path,name:result.name}]});
+  }catch(e){console.error(label,e);return interaction.editReply(`❌ ${label}に失敗しました。\n${String(e.message||e).slice(0,900)}`);}
+  finally{if(dir)setTimeout(()=>fs.rm(dir,{recursive:true,force:true}).catch(()=>{}),30_000);}
+}
+
 function musicSessionKey(guildId,voiceChannelId){return `${guildId}:${voiceChannelId}`;}
 function sessionForInteraction(interaction){
   const vcId=interaction.member?.voice?.channelId;
@@ -78,15 +178,12 @@ async function resolveMusicTrack(input){
   const row=Array.isArray(info?.entries)?info.entries[0]:info;
   if(!row)throw new Error('曲が見つかりませんでした。');
   const webpage=row.webpage_url||row.original_url||row.url;
-  if(!webpage)throw new Error('曲URLを取得できませんでした。');
-  return {title:row.title||input,url:webpage,duration:Number(row.duration)||0,id:String(row.id||webpage)};
-}
-async function resolveMusicStreamUrl(webpage){
-  // 再生直前にURLを取り直す。YouTubeの一時URL失効による再生失敗を防ぐ。
+  const title=row.title||input;
+  const duration=Number(row.duration)||0;
   const stream=await youtubedl(webpage,{getUrl:true,format:'bestaudio/best',noPlaylist:true,noWarnings:true});
   const streamUrl=String(stream).trim().split(/\r?\n/).find(x=>/^https?:\/\//.test(x));
-  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。yt-dlpを更新して再試行してください。');
-  return streamUrl;
+  if(!streamUrl)throw new Error('音声ストリームURLを取得できませんでした。');
+  return {title,url:webpage,streamUrl,duration,id:String(row.id||webpage)};
 }
 function musicStats(guildId){
   const g=guildData(store,guildId);g.musicStats??={users:{},tracks:{},totalPlays:0};return g.musicStats;
@@ -106,15 +203,8 @@ async function createMusicSession(interaction,vc){
   if(!botClient)throw new Error('このサーバーで利用できる音楽BOTがありません。4同時再生には MUSIC_BOT_TOKEN_2〜4 の追加BOTが必要です。');
   const bg=botClient.guilds.cache.get(interaction.guildId);const bvc=bg?.channels.cache.get(vc.id)||await bg?.channels.fetch(vc.id).catch(()=>null);
   if(!bvc)throw new Error('音楽BOTからボイスチャンネルを取得できません。追加BOTを同じサーバーへ招待してください。');
-  const connection=joinVoiceChannel({
-    channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true,
-    // 追加BOTごとに別groupを使い、同一サーバーで最大4VCを独立接続させる。
-    group:`music-${botClient.user.id}`
-  });
-  connection.on('error',e=>console.error(`voice connection error [${vc.id}]`,e));
-  try{await entersState(connection,VoiceConnectionStatus.Ready,20_000);}catch(e){try{connection.destroy();}catch{};throw new Error(`ボイスチャンネル接続に失敗しました: ${e.message||e}`);}
+  const connection=joinVoiceChannel({channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true});
   const player=createAudioPlayer();connection.subscribe(player);
-  player.on('error',e=>{console.error(`audio player error [${vc.id}]`,e);try{s?.ffmpeg?.kill();}catch{};if(s){s.playing=false;s.current=null;s.ffmpeg=null;s.startedAt=null;setTimeout(()=>playNext(key).catch(console.error),500);}});
   const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,startedAt:null};
   player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
   players.set(key,s);return s;
@@ -654,6 +744,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
 11. 🎵 **VC音楽**
 /play /queue /pause /resume /skip /stop /nowplaying /volume
+/download（YouTube / X / TikTok / Instagram → MP4 / MP3）
 
 12. 👑 **管理者権限**
 /owner-status /admin-role-set /admin-role-status
@@ -1918,16 +2009,14 @@ AI生成機能は搭載していません。`
             new ButtonBuilder().setCustomId('music:pause').setLabel('⏸ 一時停止').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('music:resume').setLabel('▶ 再開').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId('music:skip').setLabel('⏭ スキップ').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ 停止').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('music:leave').setLabel('👋 退出').setStyle(ButtonStyle.Secondary));
+            new ButtonBuilder().setCustomId('music:stop').setLabel('⏹ 停止').setStyle(ButtonStyle.Danger));
           await interaction.editReply({embeds:[new EmbedBuilder().setTitle('🎵 Music Player').setDescription(`**${track.title}**\n${track.url}\n\nVC: <#${vc.id}> / 担当: <@${sess.client.user.id}>`)],components:[controls]});
           if(!sess.playing)playNext(sess.key).catch(console.error);
         }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
-      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);}return interaction.reply('⏹️ このVCの再生を停止しました。BOTはVCに残ります。');}
-      if (n === 'leave') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCに接続中の音楽BOTはありません。',ephemeral:true});s.queue.length=0;try{s.ffmpeg?.kill();}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);return interaction.reply('👋 音楽BOTをこのボイスチャンネルから退出させました。');}
+      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return interaction.reply('⏹️ このVCの再生を停止しました。');}
       if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return interaction.reply('⏸️ 一時停止しました。');}
       if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return interaction.reply('▶️ 再開しました。');}
       if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return interaction.reply(s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
@@ -1937,6 +2026,43 @@ AI生成機能は搭載していません。`
         if(type==='all'||type==='users'){const users=Object.entries(st.users||{}).sort((a,b)=>(b[1].seconds||0)-(a[1].seconds||0)).slice(0,10);parts.push(`👥 **よく聴いているユーザー**\n${users.length?users.map(([id,u],i)=>`${i+1}. <@${id}> — ${fmtDuration(u.seconds)}`).join('\n'):'まだ統計がありません。'}`);}
         if(type==='all'||type==='tracks'){const tracks=Object.values(st.tracks||{}).sort((a,b)=>(b.plays||0)-(a.plays||0)).slice(0,10);parts.push(`🎶 **人気曲**\n${tracks.length?tracks.map((t,i)=>`${i+1}. ${t.title} — ${t.plays}回`).join('\n'):'まだ統計がありません。'}`);}
         return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
+      }
+      if (n === 'image-bg-remove') {
+        const att=interaction.options.getAttachment('image',true);
+        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'background_removed.png');await removeImageBackground(b,out);return {path:out,name:`${path.parse(att.name||'image').name}_transparent.png`};},'背景透過');
+      }
+      if (n === 'image-pdf') {
+        const att=interaction.options.getAttachment('image',true);
+        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'converted.pdf');await imageToPdf(b,out);return {path:out,name:`${path.parse(att.name||'image').name}.pdf`};},'PDF変換');
+      }
+      if (n === 'image-enhance') {
+        const att=interaction.options.getAttachment('image',true),scale=interaction.options.getInteger('scale',true);
+        return sendImageResult(interaction,async dir=>{const b=await fetchAttachmentBuffer(att);const out=path.join(dir,'enhanced.png');await enhanceImage(b,out,scale);return {path:out,name:`${path.parse(att.name||'image').name}_${scale}x.png`};},`画像高画質化（${scale}倍）`);
+      }
+      if (n === 'download') {
+        const url=interaction.options.getString('url',true);
+        const format=interaction.options.getString('format',true);
+        if(!supportedDownloadUrl(url)){
+          return interaction.reply({content:'❌ 対応URLは YouTube / X / TikTok / Instagram の投稿URLです。',ephemeral:true});
+        }
+        await interaction.deferReply({ephemeral:true});
+        let result=null;
+        try{
+          result=await downloadSocialMedia(url,format);
+          const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
+          if(result.size>maxBytes){
+            return interaction.editReply(`❌ 変換は完了しましたが、ファイルが ${(result.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定（${process.env.DISCORD_UPLOAD_MAX_MB||10}MB）を超えています。\
+.env の DISCORD_UPLOAD_MAX_MB は、実際に利用できるDiscord添付上限に合わせて変更できます。`);
+          }
+          return interaction.editReply({content:`✅ ${format.toUpperCase()} 変換完了`,files:[{attachment:result.filePath,name:result.fileName}]});
+        }catch(e){
+          console.error('download command failed:',e);
+          return interaction.editReply(`❌ 取得・変換に失敗しました。\
+非公開/年齢制限/ログイン必須投稿、サービス側の仕様変更などでは取得できない場合があります。\
+${String(e.message||e).slice(0,700)}`);
+        }finally{
+          if(result?.dir)setTimeout(()=>fs.rm(result.dir,{recursive:true,force:true}).catch(()=>{}),30_000);
+        }
       }
       if (n === 'video') return interaction.reply(`🎬 ${interaction.options.getString('url',true)}`);
     }
@@ -2296,16 +2422,18 @@ AI生成機能は搭載していません。`
         }
       }
       if (kind === 'music') {
-        const s=sessionForInteraction(interaction);
-        if(!s)return interaction.reply({content:'先に対象のボイスチャンネルへ参加してください。',ephemeral:true});
+        const s=players.get(interaction.guildId);
         if(a==='stop'){
-          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};s.ffmpeg=null;s.current=null;s.playing=false;s.startedAt=null;s.player.stop(true);
-          return interaction.reply({content:'⏹️ 再生を停止しました。BOTはVCに残ります。',ephemeral:true});
+          if(s){
+            s.queue.length=0;
+            try{s.ffmpeg?.kill();}catch{}
+            s.player.stop(true);
+            try{s.connection.destroy();}catch{}
+            players.delete(s.key);
+          }
+          return interaction.reply({content:'⏹️ 再生を停止しました。',ephemeral:true});
         }
-        if(a==='leave'){
-          s.queue.length=0;try{s.ffmpeg?.kill();}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
-          return interaction.reply({content:'👋 音楽BOTをVCから退出させました。',ephemeral:true});
-        }
+        if(!s)return interaction.reply({content:'現在再生中の音楽はありません。',ephemeral:true});
         if(a==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
         if(a==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
         if(a==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
@@ -2547,8 +2675,7 @@ async function playNext(key){
   if(!s||s.playing||!s.queue.length)return;
   const track=s.queue.shift();
   try{
-    const streamUrl=await resolveMusicStreamUrl(track.url);
-    const {proc,resource}=createFfmpegAudio(streamUrl);
+    const {proc,resource}=createFfmpegAudio(track.streamUrl);
     s.current=track;s.playing=true;s.ffmpeg=proc;s.startedAt=Date.now();
     resource.volume?.setVolume((s.volume??100)/100);recordTrackStart(s.guildId,track);
     proc.on('error',e=>{console.error('ffmpeg process error',e);s.playing=false;s.current=null;s.ffmpeg=null;try{s.player.stop(true);}catch{}});
