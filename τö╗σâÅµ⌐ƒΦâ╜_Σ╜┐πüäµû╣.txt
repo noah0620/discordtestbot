@@ -1,8 +1,0 @@
-画像ツール（Discordコマンド）
-
-/image compress image:<画像>  画像を5MB以下に自動圧縮
-/image bg-remove image:<画像>  背景透過PNG
-/image pdf image:<画像>        画像をPDF変換
-/image enhance image:<画像> scale:2倍/4倍  高画質化・拡大
-
-Discordのトップレベルスラッシュコマンド上限（100個）に対応するため、画像機能は /image 配下へ統合しています。
