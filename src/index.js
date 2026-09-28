@@ -24,7 +24,7 @@ import { commandData } from './commands/definitions.js';
 const HELP_CATEGORIES = [
   { id:'basic', label:'基本・BOT管理', emoji:'🤖', test:n=>['help','supportchannel','ping','owner-status','bot-restart','admin-role-set','admin-role-remove','admin-role-status','diagnostics'].includes(n) },
   { id:'shop', label:'自販機・商品・注文', emoji:'🛒', test:n=>/^(shop-|product-|order-)/.test(n) },
-  { id:'verify', label:'認証・参加退出', emoji:'✅', test:n=>/^(verify-|join-leave-|welcome-)/.test(n) },
+  { id:'verify', label:'認証・参加退出', emoji:'✅', test:n=>/^(verify-|join-leave$)/.test(n) },
   { id:'role', label:'ロール管理', emoji:'🎭', test:n=>/^role-/.test(n) },
   { id:'ticket', label:'チケット', emoji:'🎫', test:n=>/^ticket-/.test(n) },
   { id:'auto', label:'自動返信・予約・モデレーション', emoji:'💬', test:n=>/^(autoreply-|schedule-|moderation-)/.test(n) },
@@ -34,6 +34,7 @@ const HELP_CATEGORIES = [
   { id:'weather', label:'天気・地震', emoji:'🌤️', test:n=>/^(weather|earthquake)/.test(n) },
   { id:'music', label:'音楽・SNSダウンロード', emoji:'🎵', test:n=>['play','queue','skip','stop','pause','resume','nowplaying','volume','music-stats','download'].includes(n) },
   { id:'image', label:'画像・動画ツール', emoji:'🖼️', test:n=>n==='image' },
+  { id:'era', label:'西暦・和暦・年号検索', emoji:'📅', test:n=>n==='era' },
 ];
 
 function helpCommandLines(categoryId){
@@ -53,31 +54,59 @@ function helpCommandLines(categoryId){
   return lines;
 }
 
-function helpMenuRow(selected){
-  const options=HELP_CATEGORIES.map(c=>({
-    label:c.label, value:c.id, emoji:c.emoji,
-    description:`${helpCommandLines(c.id).length}件のコマンド詳細`,
-    default:c.id===selected
-  }));
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('help_category').setPlaceholder('カテゴリを選択してコマンド詳細を表示').addOptions(options)
-  );
+function helpCategoryEmbeds(){
+  const embeds=[];
+  HELP_CATEGORIES.forEach((cat,catIndex)=>{
+    const lines=helpCommandLines(cat.id);
+    if(!lines.length)return;
+    const chunks=[];
+    let current='';
+    for(const line of lines){
+      const add=(current?'\n\n':'')+line;
+      if((current+add).length>3600){
+        if(current)chunks.push(current);
+        current=line;
+      }else current+=add;
+    }
+    if(current)chunks.push(current);
+    chunks.forEach((chunk,i)=>{
+      const e=new EmbedBuilder()
+        .setDescription(`${i===0 ? `**${catIndex+1}. ${cat.emoji} ${cat.label}**\n\n` : `**${catIndex+1}. ${cat.emoji} ${cat.label}（続き）**\n\n`}${chunk}`)
+        .setFooter({text:`${lines.length}件 • コマンド定義から自動生成`});
+      if(catIndex===0 && i===0)e.setTitle('匿名N（のあBOT） コマンド詳細表示');
+      embeds.push(e);
+    });
+  });
+  return embeds;
 }
 
-function helpCategoryEmbeds(categoryId){
-  const cat=HELP_CATEGORIES.find(c=>c.id===categoryId) || HELP_CATEGORIES[0];
-  const lines=helpCommandLines(cat.id);
-  const chunks=[]; let current='';
-  for(const line of lines){
-    const add=(current?'\n\n':'')+line;
-    if((current+add).length>3600){ chunks.push(current); current=line; } else current+=add;
+async function sendHelp(interaction){
+  // DiscordのInteractionは短時間で期限切れになるため、先に応答を確保する。
+  await interaction.deferReply({ephemeral:true});
+  const embeds=helpCategoryEmbeds();
+  if(!embeds.length){
+    return interaction.editReply({content:'現在表示できるコマンドがありません。'});
   }
-  if(current)chunks.push(current);
-  return chunks.slice(0,3).map((chunk,i)=>new EmbedBuilder()
-    .setTitle(i===0 ? `匿名N（のあBOT） コマンド詳細表示` : `${cat.emoji} ${cat.label}（続き）`)
-    .setDescription(i===0 ? `${cat.emoji} **${cat.label}**\n\n${chunk}` : chunk)
-    .setFooter({text:`登録済みコマンドから自動生成 • ${lines.length}件`})
+  // Discordは1メッセージ最大10 Embed / Embed合計6000文字の制限があるため安全に分割。
+  const batches=[];
+  let batch=[];
+  let chars=0;
+  for(const embed of embeds){
+    const j=embed.toJSON();
+    const size=(j.title?.length||0)+(j.description?.length||0)+(j.footer?.text?.length||0);
+    if(batch.length>=4 || (batch.length && chars+size>5400)){
+      batches.push(batch); batch=[]; chars=0;
+    }
+    batch.push(embed); chars+=size;
+  }
+  if(batch.length)batches.push(batch);
+  const supportRow=new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary)
   );
+  await interaction.editReply({embeds:batches[0],components:batches.length===1?[supportRow]:[]});
+  for(let i=1;i<batches.length;i++){
+    await interaction.followUp({embeds:batches[i],components:i===batches.length-1?[supportRow]:[],ephemeral:true});
+  }
 }
 
 assertConfig();
@@ -93,7 +122,7 @@ process.on('uncaughtException',e=>console.error('⚠️ uncaughtException (BOT�
 // 管理者・ショップ・URL・音声の共通ヘルパー
 const ADMIN_COMMANDS=new Set([
   'shop-admin','verify-panel','verify-admin','verify-status','verify-settings',
-  'join-leave-settings','join-leave-status','welcome-settings','welcome-status','ticket-panel','ticket-settings','ticket-status','ticket-log-channel',
+  'join-leave','ticket-panel','ticket-settings','ticket-status','ticket-log-channel',
   'autoreply-add','autoreply-remove','autoreply-list','guild-settings','guild-status','setting',
   'social-source-add','social-source-remove','social-list','social-test','latest-add','x-add','x-list','x-edit','x-remove','x-test','rsshub-status','media-add','media-remove',
   'news-source-add','news-source-remove','news-list','news-auto','news-test',
@@ -852,9 +881,17 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isChatInputCommand()) {
-      const n = interaction.commandName;
+      let n = interaction.commandName;
+      // 関連機能をサブコマンドへ統合（内部では既存処理を再利用）
+      if(n==='join-leave'){
+        const sub=interaction.options.getSubcommand();
+        if(sub==='notification') n='join-leave-unified-notification';
+        else if(sub==='status') n='join-leave-status';
+        else if(sub==='welcome') n='welcome-settings';
+        else if(sub==='welcome-status') n='welcome-status';
+      }
 
-      if(ADMIN_COMMANDS.has(n) && !hasConfiguredAdminRole(interaction)){
+      if(ADMIN_COMMANDS.has(interaction.commandName) && !hasConfiguredAdminRole(interaction)){
         const g=guildData(store,interaction.guildId);
         return interaction.reply({
           content:(g.adminRoleIds||[]).length
@@ -865,6 +902,23 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
 
+      if (n === 'era') {
+        const q=interaction.options.getString('query',true).trim().replace(/\s+/g,'');
+        const eras=[
+          {name:'令和',start:'2019-05-01',y:2019,end:null},
+          {name:'平成',start:'1989-01-08',y:1989,end:'2019-04-30'},
+          {name:'昭和',start:'1926-12-25',y:1926,end:'1989-01-07'},
+          {name:'大正',start:'1912-07-30',y:1912,end:'1926-12-24'},
+          {name:'明治',start:'1868-01-25',y:1868,end:'1912-07-29'}
+        ];
+        const fmtEra=(year)=>{ const e=eras.find(x=>year>=x.y && (!x.end || year<=Number(x.end.slice(0,4)))); if(!e)return null; const n=year-e.y+1; return `${e.name}${n===1?'元':n}年`; };
+        let out='';
+        if(/^\d{4}$/.test(q)) { const y=Number(q); out=fmtEra(y)?`西暦 **${y}年** → **${fmtEra(y)}**\n※改元年は日付によって前の元号になる場合があります。`:`西暦 **${y}年**（明治以降の対応元号なし）`; }
+        else if(/^\d{4}-\d{1,2}-\d{1,2}$/.test(q)){ const d=new Date(q+'T00:00:00+09:00'); const iso=q.split('-').map((v,i)=>i?String(Number(v)).padStart(2,'0'):v).join('-'); const e=eras.find(x=>iso>=x.start && (!x.end||iso<=x.end)); out=e?`**${q}** → **${e.name}${d.getFullYear()-e.y+1===1?'元':d.getFullYear()-e.y+1}年${d.getMonth()+1}月${d.getDate()}日**`:'対応範囲は明治以降です。'; }
+        else { const m=q.match(/^(令和|平成|昭和|大正|明治)(元|\d+)年?$/); const named=eras.find(x=>x.name===q.replace(/年$/,'')); if(named){ out=`**${named.name}**\n開始: ${named.start}\n終了: ${named.end||'現在'}`; } else if(m){ const e=eras.find(x=>x.name===m[1]); const n=m[2]==='元'?1:Number(m[2]); const y=e.y+n-1; const last=e.end?Number(e.end.slice(0,4))-e.y+1:Infinity; out=n<1||n>last?'❌ その元号年は存在しません。':`**${m[1]}${m[2]}年** → 西暦 **${y}年**${n===1?`\n開始日: ${e.start}`:''}${e.end&&n===last?`\n終了日: ${e.end}`:''}`; } else out='❌ 検索形式を確認してください。例: `2026` / `令和8年` / `昭和` / `1989-01-08`'; }
+        return interaction.reply({content:`📅 **西暦・和暦・年号検索**\n${out}`,ephemeral:true});
+      }
+
       if (n === 'ping') {
         return interaction.reply({
           content:`✅ BOTは正常にコマンドを受信しています。\nBOT: ${client.user.tag}\nBOT ID: ${client.user.id}\nGuild: ${interaction.guild?.name || 'DM'}\n時刻: ${new Date().toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})}`,
@@ -874,17 +928,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (n === 'supportchannel') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
       if (n === 'help') {
-        const total=commandData.length;
-        const summary=HELP_CATEGORIES.map(c=>`${c.emoji} **${c.label}** — ${helpCommandLines(c.id).length}件`).join('\n');
-        return interaction.reply({
-          embeds:[new EmbedBuilder()
-            .setTitle('匿名N（のあBOT） コマンド詳細表示')
-            .setDescription(`現在BOTに登録されているコマンドをカテゴリ別に確認できます。\n下のメニューからカテゴリを選ぶと、**コマンド名＋詳細説明**を表示します。\n\n${summary}\n\n**トップレベル登録数: ${total}件**`)
-            .setFooter({text:'コマンド追加・変更時も登録定義から自動反映'})
-          ],
-          components:[helpMenuRow(null),new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary))],
-          ephemeral:true
-        });
+        return sendHelp(interaction);
       }
 
       if (n === 'owner-status') {
@@ -1312,26 +1356,17 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
-      if (n === 'join-leave-settings') {
+      if (n === 'join-leave-unified-notification') {
         const g=guildData(store,interaction.guildId);
-        const join=interaction.options.getChannel('join');
-        const leave=interaction.options.getChannel('leave');
-
-        if(!join && !leave){
-          return interaction.reply({
-            content:'❌ `join` または `leave` のどちらかを指定してください。',
-            ephemeral:true
-          });
-        }
-
-        if(join) g.joinLogChannelId=join.id;
-        if(leave) g.leaveLogChannelId=leave.id;
+        const type=interaction.options.getString('type',true);
+        const channel=interaction.options.getChannel('channel');
+        if(type!=='off' && !channel) return interaction.reply({content:'❌ 通知ONの場合は `channel` を指定してください。',ephemeral:true});
+        if(type==='join'){ g.joinLogChannelId=channel.id; g.leaveLogChannelId=null; }
+        if(type==='leave'){ g.joinLogChannelId=null; g.leaveLogChannelId=channel.id; }
+        if(type==='both'){ g.joinLogChannelId=channel.id; g.leaveLogChannelId=channel.id; }
+        if(type==='off'){ g.joinLogChannelId=null; g.leaveLogChannelId=null; }
         saveStore(store);
-
-        return interaction.reply({
-          content:`✅ **入退室通知設定を更新しました**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'未設定'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'未設定'}\n\n※ Developer Portal の **SERVER MEMBERS INTENT** をONにしてください。`,
-          ephemeral:true
-        });
+        return interaction.reply({content:`✅ **入退室通知設定を更新しました**\n通知モード: **${type==='join'?'入室のみ':type==='leave'?'退出のみ':type==='both'?'入室＋退出':'OFF'}**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'OFF'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'OFF'}\n\n※ Developer Portal の **SERVER MEMBERS INTENT** をONにしてください。`,ephemeral:true});
       }
 
       if (n === 'welcome-settings') {
@@ -2275,11 +2310,6 @@ client.on(Events.InteractionCreate, async interaction => {
       if(action==='orderchannel')shop.orderChannelId=ch.id;
       if(action==='saleschannel')shop.salesChannelId=ch.id;
       saveStore(store);return interaction.update({content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
-    }
-
-    if (interaction.isStringSelectMenu() && interaction.customId==='help_category') {
-      const categoryId=interaction.values[0];
-      return interaction.update({embeds:helpCategoryEmbeds(categoryId),components:[helpMenuRow(categoryId),new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary))]});
     }
 
     if (interaction.isButton() && interaction.customId==='support_help') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});

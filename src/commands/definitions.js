@@ -106,14 +106,19 @@ export const commandData = [
   new SlashCommandBuilder().setName('verify-status').setDescription('【管理者】認証パネル設定を確認'),
   new SlashCommandBuilder().setName('verify-settings').setDescription('【管理者】認証申請の承認通知先を変更')
     .addChannelOption(o=>o.setName('approval_channel').setDescription('承認通知チャンネル').setRequired(true).addChannelTypes(ChannelType.GuildText)),
-  new SlashCommandBuilder().setName('join-leave-settings').setDescription('【管理者】入退室通知チャンネルを設定')
-    .addChannelOption(o=>o.setName('join').setDescription('参加通知チャンネル').addChannelTypes(ChannelType.GuildText))
-    .addChannelOption(o=>o.setName('leave').setDescription('退出通知チャンネル').addChannelTypes(ChannelType.GuildText)),
-  new SlashCommandBuilder().setName('join-leave-status').setDescription('【管理者】入退室通知設定を確認'),
-  new SlashCommandBuilder().setName('welcome-settings').setDescription('【管理者】参加通知タイトル・認証案内を設定')
-    .addStringOption(o=>o.setName('title').setDescription('参加通知のタイトル（例: ようこそ！）'))
-    .addChannelOption(o=>o.setName('verification_channel').setDescription('新規参加者へ案内する認証パネルチャンネル').addChannelTypes(ChannelType.GuildText)),
-  new SlashCommandBuilder().setName('welcome-status').setDescription('【管理者】参加通知・認証案内設定を確認'),
+  new SlashCommandBuilder().setName('join-leave').setDescription('入退室通知・参加案内の設定と確認')
+    .addSubcommand(sc=>sc.setName('notification').setDescription('入室・退出通知のチャンネルと通知対象を設定')
+      .addStringOption(o=>o.setName('type').setDescription('通知する種類').setRequired(true).addChoices(
+        {name:'入室通知のみ',value:'join'},{name:'退出通知のみ',value:'leave'},{name:'入室＋退出',value:'both'},{name:'通知OFF',value:'off'}))
+      .addChannelOption(o=>o.setName('channel').setDescription('通知先チャンネル（通知OFF以外は必須）').addChannelTypes(ChannelType.GuildText)))
+    .addSubcommand(sc=>sc.setName('status').setDescription('現在の入退室通知設定を確認'))
+    .addSubcommand(sc=>sc.setName('welcome').setDescription('参加通知タイトル・認証案内を設定')
+      .addStringOption(o=>o.setName('title').setDescription('参加通知のタイトル（例: ようこそ！）'))
+      .addChannelOption(o=>o.setName('verification_channel').setDescription('新規参加者へ案内する認証パネルチャンネル').addChannelTypes(ChannelType.GuildText)))
+    .addSubcommand(sc=>sc.setName('welcome-status').setDescription('参加通知・認証案内設定を確認')),
+  new SlashCommandBuilder().setName('era').setDescription('西暦・和暦・年号を検索・相互変換')
+    .addSubcommand(sc=>sc.setName('search').setDescription('西暦・和暦・年号を検索')
+      .addStringOption(o=>o.setName('query').setDescription('例: 2026 / 令和8年 / 昭和 / 1989-01-08').setRequired(true))),
 
   new SlashCommandBuilder().setName('role-panel').setDescription('【管理者】このチャンネル専用のボタン式ロールパネルを設置')
     .addStringOption(o=>o.setName('title').setDescription('パネルタイトル').setRequired(false))
