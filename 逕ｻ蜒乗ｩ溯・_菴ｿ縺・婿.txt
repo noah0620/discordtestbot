@@ -17,3 +17,8 @@
 3. npm start
 
 既存の /download（SNS MP4/MP3）などは残しています。
+
+
+【画像を5MB以下に圧縮】
+/image-compress image:<画像>
+5MBを超える画像を画質優先で自動調整し、5MB以下のJPEGとして返します。すでに5MB以下なら再圧縮せず返します。入力上限は50MBです。

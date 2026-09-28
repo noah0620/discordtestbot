@@ -313,6 +313,8 @@ export const commandData = [
     .addAttachmentOption(o=>o.setName('image').setDescription('背景を透過する画像').setRequired(true)),
   new SlashCommandBuilder().setName('image-pdf').setDescription('画像ファイルをPDFに変換')
     .addAttachmentOption(o=>o.setName('image').setDescription('PDFに変換する画像').setRequired(true)),
+  new SlashCommandBuilder().setName('image-compress').setDescription('画像を5MB以下に自動圧縮')
+    .addAttachmentOption(o=>o.setName('image').setDescription('5MB以下に圧縮する画像').setRequired(true)),
   new SlashCommandBuilder().setName('image-enhance').setDescription('画像を高画質化・拡大')
     .addAttachmentOption(o=>o.setName('image').setDescription('高画質化する画像').setRequired(true))
     .addIntegerOption(o=>o.setName('scale').setDescription('拡大倍率').setRequired(true).addChoices(

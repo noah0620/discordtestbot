@@ -148,6 +148,32 @@ async function enhanceImage(buffer,outPath,scale){
   const width=Math.min((meta.width||1)*scale,12000),height=Math.min((meta.height||1)*scale,12000);
   await img.resize({width,height,fit:'fill',kernel:sharp.kernel.lanczos3}).sharpen({sigma:1}).png({compressionLevel:6}).toFile(outPath);
 }
+async function compressImageTo5Mb(buffer,outPath){
+  const limit=5*1024*1024;
+  if(buffer.length<=limit){
+    await fs.writeFile(outPath,buffer);
+    return {unchanged:true,size:buffer.length};
+  }
+  const base=sharp(buffer,{animated:false}).rotate().flatten({background:'#ffffff'});
+  const meta=await base.metadata();
+  let width=meta.width||1920;
+  let quality=92;
+  let scale=1;
+  let best=null;
+  for(let attempt=0;attempt<30;attempt++){
+    const targetWidth=Math.max(320,Math.round(width*scale));
+    const candidate=await sharp(buffer,{animated:false}).rotate().flatten({background:'#ffffff'})
+      .resize({width:targetWidth,withoutEnlargement:true,kernel:sharp.kernel.lanczos3})
+      .jpeg({quality,mozjpeg:true,chromaSubsampling:'4:2:0'})
+      .toBuffer();
+    if(candidate.length<=limit){best=candidate;break;}
+    if(quality>55) quality-=7;
+    else {scale*=0.88;quality=82;}
+  }
+  if(!best)throw new Error('5MB以下まで圧縮できませんでした。元画像の解像度を下げて再度お試しください。');
+  await fs.writeFile(outPath,best);
+  return {unchanged:false,size:best.length};
+}
 async function removeImageBackground(buffer,outPath){
   const {removeBackground}=await import('@imgly/background-removal-node');
   const input=new Blob([buffer],{type:'image/png'});
@@ -160,7 +186,7 @@ async function sendImageResult(interaction,work,label){
     dir=await makeTempImageDir();const result=await work(dir);const st=await fs.stat(result.path);
     const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
     if(st.size>maxBytes)return interaction.editReply(`❌ 処理は完了しましたが、出力ファイルが ${(st.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定を超えています。`);
-    return interaction.editReply({content:`✅ ${label} 完了`,files:[{attachment:result.path,name:result.name}]});
+    return interaction.editReply({content:`✅ ${label} 完了${result.message?`\n${result.message}`:''}`,files:[{attachment:result.path,name:result.name}]});
   }catch(e){console.error(label,e);return interaction.editReply(`❌ ${label}に失敗しました。\n${String(e.message||e).slice(0,900)}`);}
   finally{if(dir)setTimeout(()=>fs.rm(dir,{recursive:true,force:true}).catch(()=>{}),30_000);}
 }
@@ -2026,6 +2052,18 @@ AI生成機能は搭載していません。`
         if(type==='all'||type==='users'){const users=Object.entries(st.users||{}).sort((a,b)=>(b[1].seconds||0)-(a[1].seconds||0)).slice(0,10);parts.push(`👥 **よく聴いているユーザー**\n${users.length?users.map(([id,u],i)=>`${i+1}. <@${id}> — ${fmtDuration(u.seconds)}`).join('\n'):'まだ統計がありません。'}`);}
         if(type==='all'||type==='tracks'){const tracks=Object.values(st.tracks||{}).sort((a,b)=>(b.plays||0)-(a.plays||0)).slice(0,10);parts.push(`🎶 **人気曲**\n${tracks.length?tracks.map((t,i)=>`${i+1}. ${t.title} — ${t.plays}回`).join('\n'):'まだ統計がありません。'}`);}
         return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
+      }
+      if (n === 'image-compress') {
+        const att=interaction.options.getAttachment('image',true);
+        return sendImageResult(interaction,async dir=>{
+          const b=await fetchAttachmentBuffer(att,50);
+          const originalExt=(path.extname(att.name||'')||'.jpg').toLowerCase();
+          const alreadySmall=b.length<=5*1024*1024;
+          const out=path.join(dir,alreadySmall?`compressed${originalExt}`:'compressed.jpg');
+          const info=await compressImageTo5Mb(b,out);
+          const mb=(info.size/1024/1024).toFixed(2);
+          return {path:out,name:`${path.parse(att.name||'image').name}_5MB${alreadySmall?originalExt:'.jpg'}`,message:info.unchanged?`元画像はすでに5MB以下です（${mb}MB）`:`${mb}MBまで圧縮しました`};
+        },'画像5MB圧縮');
       }
       if (n === 'image-bg-remove') {
         const att=interaction.options.getAttachment('image',true);
