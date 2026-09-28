@@ -150,6 +150,55 @@ async function fetchAttachmentBuffer(att,maxMb=20){
   if(b.length>maxMb*1024*1024)throw new Error(`画像サイズは${maxMb}MB以下にしてください。`);
   return b;
 }
+const VIDEO_TYPES = new Set(['video/mp4','video/quicktime','video/webm','video/x-matroska','video/avi','video/x-msvideo']);
+function validVideoAttachment(att){
+  return Boolean(att && (VIDEO_TYPES.has(String(att.contentType||'').toLowerCase()) || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(att.name||'')));
+}
+async function fetchVideoAttachment(att,maxMb=100){
+  if(!validVideoAttachment(att))throw new Error('MP4 / MOV / WebM / MKV / AVI / M4V の動画を指定してください。');
+  if(att.size && att.size>maxMb*1024*1024)throw new Error(`入力動画は${maxMb}MB以下にしてください。`);
+  const r=await fetch(att.url); if(!r.ok)throw new Error(`動画を取得できませんでした (${r.status})`);
+  const b=Buffer.from(await r.arrayBuffer());
+  if(b.length>maxMb*1024*1024)throw new Error(`入力動画は${maxMb}MB以下にしてください。`);
+  return b;
+}
+function runFfmpeg(args){
+  return new Promise((resolve,reject)=>{
+    const c=spawn(ffmpegPath,args,{windowsHide:true,stdio:['ignore','ignore','pipe']}); let err='';
+    c.stderr.on('data',d=>err+=d.toString());
+    c.on('error',reject); c.on('close',code=>code===0?resolve(err):reject(new Error(err.slice(-1800)||`FFmpeg exited with code ${code}`)));
+  });
+}
+async function videoDurationSeconds(input){
+  return new Promise((resolve,reject)=>{
+    const c=spawn(ffmpegPath,['-hide_banner','-i',input],{windowsHide:true,stdio:['ignore','ignore','pipe']}); let err='';
+    c.stderr.on('data',d=>err+=d.toString());
+    c.on('error',reject); c.on('close',()=>{const m=err.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/); if(!m)return reject(new Error('動画の再生時間を取得できませんでした。')); resolve(+m[1]*3600 + +m[2]*60 + +m[3]);});
+  });
+}
+async function compressVideoTo5Mb(buffer,dir){
+  const limit=5*1024*1024, target=Math.floor(limit*0.96); const input=path.join(dir,'input_video'); await fs.writeFile(input,buffer);
+  if(buffer.length<=limit){
+    const out=path.join(dir,'compressed.mp4');
+    await runFfmpeg(['-y','-i',input,'-map','0:v:0','-map','0:a?','-c:v','libx264','-preset','medium','-crf','20','-c:a','aac','-b:a','96k','-movflags','+faststart',out]);
+    const st=await fs.stat(out); if(st.size<=limit)return {path:out,size:st.size};
+  }
+  const duration=await videoDurationSeconds(input); if(!duration||duration<=0)throw new Error('動画の長さを取得できませんでした。');
+  if(duration>60*30)throw new Error('5MB圧縮は30分以内の動画に対応しています。長い動画は5MBでは画質が極端に低下します。');
+  let audioK=duration>600?48:64;
+  let totalK=Math.floor((target*8/1000)/duration);
+  let videoK=Math.max(80,totalK-audioK-16);
+  let scale='-2:1080';
+  if(videoK<900)scale='-2:720'; if(videoK<450)scale='-2:480'; if(videoK<220)scale='-2:360';
+  for(let attempt=0;attempt<4;attempt++){
+    const out=path.join(dir,`compressed_${attempt}.mp4`);
+    await runFfmpeg(['-y','-i',input,'-map','0:v:0','-map','0:a?','-vf',`scale=${scale}:force_original_aspect_ratio=decrease`,'-c:v','libx264','-preset','medium','-b:v',`${videoK}k`,'-maxrate',`${videoK}k`,'-bufsize',`${Math.max(videoK*2,160)}k`,'-c:a','aac','-b:a',`${audioK}k`,'-movflags','+faststart',out]);
+    const st=await fs.stat(out); if(st.size<=limit)return {path:out,size:st.size};
+    videoK=Math.max(60,Math.floor(videoK*0.82)); if(attempt===1)scale='-2:480'; if(attempt===2)scale='-2:360';
+  }
+  throw new Error('この動画は5MB以下まで圧縮できませんでした。動画を短くして再度お試しください。');
+}
+
 async function makeTempImageDir(){return fs.mkdtemp(path.join(os.tmpdir(),'discord-image-'));}
 async function imageToPdf(buffer,outPath){
   const normalized=await sharp(buffer,{animated:false}).rotate().jpeg({quality:95}).toBuffer();
@@ -2105,6 +2154,19 @@ AI生成機能は搭載していません。`
             const mb=(info.size/1024/1024).toFixed(2);
             return {path:out,name:`${path.parse(att.name||'image').name}_5MB${alreadySmall?originalExt:'.jpg'}`,message:info.unchanged?`元画像はすでに5MB以下です（${mb}MB）`:`${mb}MBまで圧縮しました`};
           },'画像5MB圧縮');
+        }
+        if (sub === 'video-compress') {
+          const att=interaction.options.getAttachment('video',true);
+          await interaction.deferReply({ephemeral:true});
+          const dir=await makeTempImageDir();
+          try{
+            const b=await fetchVideoAttachment(att,100);
+            const result=await compressVideoTo5Mb(b,dir);
+            const mb=(result.size/1024/1024).toFixed(2);
+            await interaction.editReply({content:`🎬 動画を ${mb}MB に圧縮しました。`,files:[{attachment:result.path,name:`${path.parse(att.name||'video').name}_5MB.mp4`}]});
+          }catch(e){await interaction.editReply(`❌ 動画圧縮に失敗しました。\n${String(e?.message||e).slice(0,1500)}`);}
+          finally{await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});}
+          return;
         }
         if (sub === 'bg-remove') {
           const att=interaction.options.getAttachment('image',true);
