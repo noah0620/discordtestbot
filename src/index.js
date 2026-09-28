@@ -54,8 +54,8 @@ function helpCommandLines(categoryId){
   return lines;
 }
 
-function helpCategoryEmbeds(){
-  const embeds=[];
+function helpPages(){
+  const pages=[];
   HELP_CATEGORIES.forEach((cat,catIndex)=>{
     const lines=helpCommandLines(cat.id);
     if(!lines.length)return;
@@ -63,50 +63,50 @@ function helpCategoryEmbeds(){
     let current='';
     for(const line of lines){
       const add=(current?'\n\n':'')+line;
-      if((current+add).length>3600){
+      if((current+add).length>3300){
         if(current)chunks.push(current);
         current=line;
       }else current+=add;
     }
     if(current)chunks.push(current);
     chunks.forEach((chunk,i)=>{
-      const e=new EmbedBuilder()
-        .setDescription(`${i===0 ? `**${catIndex+1}. ${cat.emoji} ${cat.label}**\n\n` : `**${catIndex+1}. ${cat.emoji} ${cat.label}（続き）**\n\n`}${chunk}`)
-        .setFooter({text:`${lines.length}件 • コマンド定義から自動生成`});
-      if(catIndex===0 && i===0)e.setTitle('匿名N（のあBOT） コマンド詳細表示');
-      embeds.push(e);
+      pages.push({
+        categoryNumber:catIndex+1,
+        categoryLabel:`${cat.emoji} ${cat.label}${i?`（続き ${i+1}）`:''}`,
+        commandCount:lines.length,
+        description:chunk
+      });
     });
   });
-  return embeds;
+  return pages;
+}
+
+function buildHelpPage(pageIndex=0){
+  const pages=helpPages();
+  if(!pages.length)return null;
+  const index=Math.max(0,Math.min(Number(pageIndex)||0,pages.length-1));
+  const page=pages[index];
+  const embed=new EmbedBuilder()
+    .setTitle('匿名N（のあBOT） コマンド詳細表示')
+    .setDescription(`**${page.categoryNumber}. ${page.categoryLabel}**\n\n${page.description}`)
+    .setFooter({text:`📖 ${index+1} / ${pages.length}ページ • ${page.commandCount}件 • コマンド定義から自動生成`});
+
+  const navRow=new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('help_page:0').setLabel('⏮ 最初').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
+    new ButtonBuilder().setCustomId(`help_page:${Math.max(0,index-1)}`).setLabel('◀ 前へ').setStyle(ButtonStyle.Secondary).setDisabled(index===0),
+    new ButtonBuilder().setCustomId(`help_page:${Math.min(pages.length-1,index+1)}`).setLabel('次へ ▶').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
+    new ButtonBuilder().setCustomId(`help_page:${pages.length-1}`).setLabel('最後 ⏭').setStyle(ButtonStyle.Secondary).setDisabled(index===pages.length-1),
+    new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary)
+  );
+  return {embed,navRow,index,total:pages.length};
 }
 
 async function sendHelp(interaction){
-  // DiscordのInteractionは短時間で期限切れになるため、先に応答を確保する。
+  // 先に応答を確保し、1メッセージ内でページを切り替える。
   await interaction.deferReply({ephemeral:true});
-  const embeds=helpCategoryEmbeds();
-  if(!embeds.length){
-    return interaction.editReply({content:'現在表示できるコマンドがありません。'});
-  }
-  // Discordは1メッセージ最大10 Embed / Embed合計6000文字の制限があるため安全に分割。
-  const batches=[];
-  let batch=[];
-  let chars=0;
-  for(const embed of embeds){
-    const j=embed.toJSON();
-    const size=(j.title?.length||0)+(j.description?.length||0)+(j.footer?.text?.length||0);
-    if(batch.length>=4 || (batch.length && chars+size>5400)){
-      batches.push(batch); batch=[]; chars=0;
-    }
-    batch.push(embed); chars+=size;
-  }
-  if(batch.length)batches.push(batch);
-  const supportRow=new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('support_help').setLabel('🆘 サポート').setStyle(ButtonStyle.Primary)
-  );
-  await interaction.editReply({embeds:batches[0],components:batches.length===1?[supportRow]:[]});
-  for(let i=1;i<batches.length;i++){
-    await interaction.followUp({embeds:batches[i],components:i===batches.length-1?[supportRow]:[],ephemeral:true});
-  }
+  const page=buildHelpPage(0);
+  if(!page)return interaction.editReply({content:'現在表示できるコマンドがありません。'});
+  return interaction.editReply({embeds:[page.embed],components:[page.navRow]});
 }
 
 assertConfig();
@@ -2312,6 +2312,13 @@ client.on(Events.InteractionCreate, async interaction => {
       saveStore(store);return interaction.update({content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith('help_page:')) {
+      // Discordの3秒制限内に即時更新。重い処理は行わない。
+      const requested=Number(interaction.customId.split(':')[1] || 0);
+      const page=buildHelpPage(requested);
+      if(!page)return interaction.update({content:'現在表示できるコマンドがありません。',embeds:[],components:[]});
+      return interaction.update({embeds:[page.embed],components:[page.navRow]});
+    }
     if (interaction.isButton() && interaction.customId==='support_help') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
     if (interaction.isStringSelectMenu() && interaction.customId==='rolecolor') {
       if(!hasConfiguredAdminRole(interaction))return interaction.reply({content:'❌ 管理者ロールが必要です。',ephemeral:true});

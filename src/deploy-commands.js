@@ -21,10 +21,35 @@ if (config.clientId && config.clientId !== actualApplicationId) {
   console.warn('   今回は安全のため Token BOT ID 側へコマンドを登録します。');
 }
 
-await rest.put(
+const body = commandData.map(c=>c.toJSON());
+const localNames = body.map(c=>c.name);
+console.log(`📦 登録対象コマンド数: ${body.length}`);
+console.log(`📅 /era 登録対象: ${localNames.includes('era') ? '✅ YES' : '❌ NO'}`);
+
+if (!localNames.includes('era')) {
+  throw new Error('/era がローカルのコマンド定義にありません。登録を中止しました。');
+}
+
+const registered = await rest.put(
   Routes.applicationCommands(actualApplicationId),
-  { body: commandData.map(c=>c.toJSON()) }
+  { body }
 );
 
-console.log(`✅ Global commands registered to ${actualApplicationId}: ${commandData.length}`);
-console.log('ℹ️ Discord側への反映には少し時間がかかる場合があります。');
+console.log(`✅ Global commands registered to ${actualApplicationId}: ${registered.length}`);
+
+// Discord API側へ本当に登録された内容を再取得して検証する。
+const remote = await rest.get(Routes.applicationCommands(actualApplicationId));
+const remoteNames = remote.map(c=>c.name);
+const era = remote.find(c=>c.name==='era');
+console.log(`🔎 Discord側 /era: ${era ? '✅ 登録済み' : '❌ 見つかりません'}`);
+if (era) {
+  const subNames = (era.options || []).filter(o=>o.type===1).map(o=>o.name);
+  console.log(`   /era サブコマンド: ${subNames.length ? subNames.join(', ') : 'なし'}`);
+  if (!subNames.includes('search')) {
+    throw new Error('Discord側の /era に search サブコマンドがありません。');
+  }
+}
+if (!era) {
+  throw new Error('Discord APIへの登録後確認で /era が見つかりませんでした。');
+}
+console.log('ℹ️ Discordアプリ側で古い候補が残る場合はDiscordを再起動してから /era を入力してください。');
