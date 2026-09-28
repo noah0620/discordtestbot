@@ -314,6 +314,20 @@ export const commandData = [
   new SlashCommandBuilder().setName('music-stats').setDescription('音楽の再生統計を表示')
     .addStringOption(o=>o.setName('type').setDescription('表示内容').addChoices({name:'よく聴いているユーザー',value:'users'},{name:'人気曲',value:'tracks'},{name:'全体',value:'all'})),
 
+  new SlashCommandBuilder().setName('game').setDescription('Discordで遊べるミニゲーム')
+    .addSubcommand(sc=>sc.setName('tictactoe').setDescription('9マスの三目並べで対戦')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手').setRequired(true)))
+    .addSubcommand(sc=>sc.setName('rps').setDescription('BOTとじゃんけん')),
+  new SlashCommandBuilder().setName('timer').setDescription('タイマーを開始・確認・キャンセル')
+    .addSubcommand(sc=>sc.setName('start').setDescription('3分・5分・10分のショートカットで開始')
+      .addIntegerOption(o=>o.setName('minutes').setDescription('時間').setRequired(true).addChoices(
+        {name:'3分',value:3},{name:'5分',value:5},{name:'10分',value:10}
+      )))
+    .addSubcommand(sc=>sc.setName('custom').setDescription('1〜1440分で時間を指定して開始')
+      .addIntegerOption(o=>o.setName('minutes').setDescription('分数').setRequired(true).setMinValue(1).setMaxValue(1440)))
+    .addSubcommand(sc=>sc.setName('status').setDescription('自分のタイマー残り時間を確認'))
+    .addSubcommand(sc=>sc.setName('cancel').setDescription('自分のタイマーをキャンセル')),
+
   new SlashCommandBuilder().setName('image').setDescription('画像変換・加工ツール')
     .addSubcommand(sc=>sc.setName('bg-remove').setDescription('画像の背景をAIで透過してPNGに変換')
       .addAttachmentOption(o=>o.setName('image').setDescription('背景を透過する画像').setRequired(true)))
