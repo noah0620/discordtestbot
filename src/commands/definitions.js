@@ -315,8 +315,10 @@ export const commandData = [
     .addStringOption(o=>o.setName('type').setDescription('表示内容').addChoices({name:'よく聴いているユーザー',value:'users'},{name:'人気曲',value:'tracks'},{name:'全体',value:'all'})),
 
   new SlashCommandBuilder().setName('game').setDescription('Discordで遊べるミニゲーム')
-    .addSubcommand(sc=>sc.setName('tictactoe').setDescription('9マスの三目並べで対戦')
-      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手').setRequired(true)))
+    .addSubcommand(sc=>sc.setName('tictactoe').setDescription('9マスの三目並べ（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
+    .addSubcommand(sc=>sc.setName('gomoku').setDescription('5×5の五目並べ（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
     .addSubcommand(sc=>sc.setName('rps').setDescription('BOTとじゃんけん')),
   new SlashCommandBuilder().setName('timer').setDescription('タイマーを開始・確認・キャンセル')
     .addSubcommand(sc=>sc.setName('start').setDescription('3分・5分・10分のショートカットで開始')
