@@ -128,6 +128,7 @@ const players = new Map(); // key: guildId:voiceChannelId
 const musicBotClients=[];
 const pendingRoleCreates = new Map();
 const ticTacToeGames = new Map();
+const gomokuGames = new Map();
 const userTimers = new Map();
 process.on('unhandledRejection',e=>console.error('⚠️ unhandledRejection (BOT継続):',e));
 process.on('uncaughtException',e=>console.error('⚠️ uncaughtException (BOT継続):',e));
@@ -370,38 +371,26 @@ function sessionForInteraction(interaction){
   return vcId?players.get(musicSessionKey(interaction.guildId,vcId)):null;
 }
 function fmtDuration(sec){sec=Math.max(0,Number(sec)||0);const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=Math.floor(sec%60);return h?`${h}時間${m}分`:(m?`${m}分${s}秒`:`${s}秒`);}
+function musicCookieArgs(){
+  const candidates=[process.env.YOUTUBE_COOKIE,path.resolve(process.cwd(),'cookies.txt')].filter(Boolean);
+  const cookie=candidates.find(x=>fsSync.existsSync(x));
+  return cookie?['--cookies',cookie]:[];
+}
 async function resolveMusicTrack(input){
-  // ANMusicBOT方式: 検索/URL判定はplay-dl、実際の音声URLは再生直前にyt-dlpで取得する。
-  if(/^https?:\/\//i.test(input)){
-    const type=await play.yt_validate(input).catch(()=>false);
-    if(type==='video'){
-      const info=await play.video_info(input);
-      const v=info.video_details;
-      return {title:v.title||input,url:v.url||input,duration:Number(v.durationInSec)||0,id:String(v.id||v.url||input)};
-    }
-    // YouTube以外など、play-dlが判定できないURLもyt-dlpへ渡せるよう保持する。
-    return {title:input,url:input,duration:0,id:input};
-  }
-  const rows=await play.search(input,{limit:1,source:{youtube:'video'}});
-  const v=rows?.[0];
-  if(!v)throw new Error('曲が見つかりませんでした。');
-  return {title:v.title||input,url:v.url,duration:Number(v.durationInSec)||0,id:String(v.id||v.url)};
+  // 検索もyt-dlpへ統一。play-dl側のYouTube仕様変更で検索だけ失敗する問題を回避。
+  const target=/^https?:\/\//i.test(input)?input:`ytsearch1:${input}`;
+  const stdout=await runYtDlp(['--dump-single-json','--no-playlist','--skip-download','--no-warnings',...musicCookieArgs(),target],{capture:true});
+  let info;try{info=JSON.parse(stdout);}catch{throw new Error('yt-dlpの検索結果を読み取れませんでした。');}
+  if(info?.entries?.length)info=info.entries[0];
+  const url=info?.webpage_url||info?.original_url||(/^https?:\/\//i.test(input)?input:null);
+  if(!url)throw new Error('曲が見つかりませんでした。');
+  return {title:info?.title||input,url,duration:Number(info?.duration)||0,id:String(info?.id||url)};
 }
 async function freshMusicStreamUrl(pageUrl){
-  // SNSダウンロード機能と同じ、動作確認済みの Python yt-dlp を音楽再生にも使用する。
-  // youtube-dl-exec 内蔵バイナリへの依存を避け、Windowsでは `python -m yt_dlp` を使う。
-  const args=['--no-playlist','--no-warnings','-f','bestaudio/best','-g'];
-  const cookieCandidates=[
-    process.env.YOUTUBE_COOKIE,
-    path.resolve(process.cwd(),'cookies.txt'),
-    path.resolve(path.dirname(new URL(import.meta.url).pathname),'..','cookies.txt')
-  ].filter(Boolean);
-  const cookie=cookieCandidates.find(x=>fsSync.existsSync(x));
-  if(cookie)args.push('--cookies',cookie);
-  args.push(pageUrl);
+  const args=['--no-playlist','--no-warnings','-f','bestaudio/best','-g',...musicCookieArgs(),pageUrl];
   const stdout=await runYtDlp(args,{capture:true});
   const u=String(stdout).trim().split(/\r?\n/).map(x=>x.trim()).find(x=>/^https?:\/\//i.test(x));
-  if(!u)throw new Error('yt-dlpから音声ストリームURLを取得できませんでした。cookies.txt や動画の公開状態を確認してください。');
+  if(!u)throw new Error('yt-dlpから音声ストリームURLを取得できませんでした。cookies.txt と yt-dlp を確認してください。');
   return u;
 }
 
@@ -425,25 +414,43 @@ async function createMusicSession(interaction,vc){
   if(!bvc)throw new Error('音楽BOTからボイスチャンネルを取得できません。追加BOTを同じサーバーへ招待してください。');
   const connection=joinVoiceChannel({channelId:vc.id,guildId:interaction.guildId,adapterCreator:bg.voiceAdapterCreator,selfDeaf:true,group:`music-${botClient.user.id}`});
   await entersState(connection,VoiceConnectionStatus.Ready,20000);
-  const player=createAudioPlayer();connection.subscribe(player);
+  const player=createAudioPlayer();
+  const subscription=connection.subscribe(player);
+  if(!subscription)throw new Error('Discord VoiceへAudioPlayerを接続できませんでした。');
+  player.on('error',e=>console.error('🔴 AudioPlayer error:',e));
+  player.on(AudioPlayerStatus.Playing,()=>console.log(`🔊 音楽再生開始: guild=${interaction.guildId} vc=${vc.id}`));
+  player.on(AudioPlayerStatus.Paused,()=>console.log(`⏸️ 音楽一時停止: guild=${interaction.guildId} vc=${vc.id}`));
   const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,startedAt:null};
   player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
   players.set(key,s);return s;
 }
 
-function createFfmpegAudio(url){
-  if(!validHttpUrl(url))throw new Error('再生URLが正しくありません。');
+function createFfmpegAudio(pageUrl){
+  if(!validHttpUrl(pageUrl))throw new Error('再生URLが正しくありません。');
+  // YouTube CDNの一時URLをFFmpegへ直接渡す方式は403/ヘッダー差異で無音になりやすい。
+  // yt-dlp自身にメディアをstdoutへ流させ、FFmpegはstdinからデコードする。
+  const command=ytDlpPythonCommand();
+  const downloader=spawn(command,['-m','yt_dlp',
+    '--no-playlist','--no-warnings','--quiet',
+    '-f','bestaudio/best','-o','-',
+    ...musicCookieArgs(),pageUrl
+  ],{windowsHide:true,stdio:['ignore','pipe','pipe']});
   const proc=spawn(ffmpegPath,[
     '-hide_banner','-loglevel','warning',
-    '-reconnect','1','-reconnect_streamed','1','-reconnect_delay_max','5',
-    '-i',url,
-    '-f','s16le','-ar','48000','-ac','2','pipe:1'
-  ],{stdio:['ignore','pipe','pipe']});
-  proc.stderr?.on('data',d=>console.error(`ffmpeg: ${String(d).trim()}`));
+    '-i','pipe:0',
+    '-vn','-f','s16le','-ar','48000','-ac','2','pipe:1'
+  ],{windowsHide:true,stdio:['pipe','pipe','pipe']});
+  downloader.stdout.pipe(proc.stdin);
+  downloader.stderr?.on('data',d=>{const m=String(d).trim();if(m)console.error(`yt-dlp audio: ${m}`);});
+  proc.stderr?.on('data',d=>{const m=String(d).trim();if(m)console.error(`ffmpeg audio: ${m}`);});
+  downloader.on('error',e=>console.error('yt-dlp audio process error:',e));
+  proc.on('error',e=>console.error('ffmpeg audio process error:',e));
+  downloader.on('close',code=>{if(code&&code!==0)console.error(`yt-dlp audio exited: ${code}`);});
+  proc.on('close',()=>{try{if(!downloader.killed)downloader.kill('SIGKILL');}catch{}});
+  // 既存の停止処理はs.ffmpeg.kill()を呼ぶため、FFmpeg終了時にyt-dlpも連動終了する。
   const resource=createAudioResource(proc.stdout,{inputType:StreamType.Raw,inlineVolume:true});
-  return {proc,resource};
+  return {proc,resource,downloader};
 }
-
 
 function buildChannelRolePanel(channelId,cfg,valid,page=0){
   const PAGE_SIZE=20;
@@ -924,67 +931,77 @@ client.on(Events.InteractionCreate, async interaction => {
 
 
       if (n === 'game') {
+        // Discordの3秒制限より先にACK。以降はeditReplyを使用する。
+        await interaction.deferReply();
         const sub=interaction.options.getSubcommand();
+        const opponent=interaction.options.getUser('opponent',false);
+        if((sub==='tictactoe'||sub==='gomoku') && opponent?.id===interaction.user.id)return interaction.editReply('❌ 自分自身とは対戦できません。');
+        if((sub==='tictactoe'||sub==='gomoku') && opponent?.bot)return interaction.editReply('❌ BOT対戦は対戦相手を指定せず実行してください。');
         if(sub==='tictactoe'){
-          const opponent=interaction.options.getUser('opponent',true);
-          if(opponent.bot)return interaction.reply({content:'❌ BOTとは三目並べできません。人間のユーザーを指定してください。',ephemeral:true});
-          if(opponent.id===interaction.user.id)return interaction.reply({content:'❌ 自分自身とは対戦できません。',ephemeral:true});
-          const gameId=randomUUID().slice(0,8);
-          const game={id:gameId,guildId:interaction.guildId,channelId:interaction.channelId,players:[interaction.user.id,opponent.id],board:Array(9).fill(null),turn:0,ended:false};
+          const gameId=randomUUID().slice(0,8), botId=client.user.id;
+          const game={id:gameId,guildId:interaction.guildId,channelId:interaction.channelId,players:[interaction.user.id,opponent?.id||botId],bot:!opponent,board:Array(9).fill(null),turn:0,ended:false};
           ticTacToeGames.set(gameId,game);
-          const render=()=>{
-            const rows=[];
-            for(let r=0;r<3;r++){
-              const row=new ActionRowBuilder();
-              for(let c=0;c<3;c++){
-                const i=r*3+c,v=game.board[i];
-                row.addComponents(new ButtonBuilder().setCustomId(`ttt:${gameId}:${i}`).setLabel(v==='X'?'❌':v==='O'?'⭕':'➖').setStyle(v==='X'?ButtonStyle.Danger:v==='O'?ButtonStyle.Primary:ButtonStyle.Secondary).setDisabled(Boolean(v)||game.ended));
-              }
-              rows.push(row);
-            }
-            return rows;
-          };
-          game.render=render;
-          const msg=await interaction.reply({content:`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ <@${game.players[1]}>\n現在の手番: <@${game.players[0]}>`,components:render(),fetchReply:true});
-          game.messageId=msg.id;
-          return;
+          game.render=()=>Array.from({length:3},(_,r)=>new ActionRowBuilder().addComponents(...Array.from({length:3},(_,c)=>{const i=r*3+c,v=game.board[i];return new ButtonBuilder().setCustomId(`ttt:${gameId}:${i}`).setLabel(v==='X'?'❌':v==='O'?'⭕':'➖').setStyle(v==='X'?ButtonStyle.Danger:v==='O'?ButtonStyle.Primary:ButtonStyle.Secondary).setDisabled(Boolean(v)||game.ended);})));
+          const who=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
+          const msg=await interaction.editReply({content:`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ ${who}\n現在の手番: <@${game.players[0]}>`,components:game.render()});
+          game.messageId=msg.id; return;
+        }
+        if(sub==='gomoku'){
+          const gameId=randomUUID().slice(0,8), botId=client.user.id;
+          const game={id:gameId,guildId:interaction.guildId,channelId:interaction.channelId,players:[interaction.user.id,opponent?.id||botId],bot:!opponent,board:Array(25).fill(null),turn:0,ended:false};
+          gomokuGames.set(gameId,game);
+          game.render=()=>Array.from({length:5},(_,r)=>new ActionRowBuilder().addComponents(...Array.from({length:5},(_,c)=>{const i=r*5+c,v=game.board[i];return new ButtonBuilder().setCustomId(`gomoku:${gameId}:${i}`).setLabel(v==='X'?'⚫':v==='O'?'⚪':'・').setStyle(v==='X'?ButtonStyle.Danger:v==='O'?ButtonStyle.Primary:ButtonStyle.Secondary).setDisabled(Boolean(v)||game.ended);})));
+          const who=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
+          const msg=await interaction.editReply({content:`⚫⚪ **5×5 五目並べ**\n⚫ <@${game.players[0]}> vs ⚪ ${who}\n現在の手番: <@${game.players[0]}>`,components:game.render()});
+          game.messageId=msg.id; return;
         }
         if(sub==='rps'){
           const id=randomUUID().slice(0,8);
           const row=new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`rps:${id}:${interaction.user.id}:rock`).setLabel('✊ グー').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId(`rps:${id}:${interaction.user.id}:scissors`).setLabel('✌️ チョキ').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId(`rps:${id}:${interaction.user.id}:paper`).setLabel('✋ パー').setStyle(ButtonStyle.Primary)
-          );
-          return interaction.reply({content:'🎮 **じゃんけん**\n出す手を選んでください。',components:[row]});
+            new ButtonBuilder().setCustomId(`rps:${id}:${interaction.user.id}:paper`).setLabel('✋ パー').setStyle(ButtonStyle.Primary));
+          return interaction.editReply({content:'🎮 **じゃんけん**\n出す手を選んでください。',components:[row]});
         }
       }
 
       if (n === 'timer') {
+        // 最初にACKしてUnknown interaction(10062)を防止。
+        await interaction.deferReply({ephemeral:true});
         const sub=interaction.options.getSubcommand();
         const key=`${interaction.guildId||'dm'}:${interaction.user.id}`;
         if(sub==='status'){
           const t=userTimers.get(key);
-          if(!t)return interaction.reply({content:'⏱️ 現在動作中のタイマーはありません。',ephemeral:true});
+          if(!t)return interaction.editReply('⏱️ 現在動作中のタイマーはありません。');
           const sec=Math.max(0,Math.ceil((t.endsAt-Date.now())/1000));
-          return interaction.reply({content:`⏱️ 残り **${Math.floor(sec/60)}分${sec%60}秒** です。`,ephemeral:true});
+          return interaction.editReply(`⏱️ 残り **${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}** です。`);
         }
         if(sub==='cancel'){
           const t=userTimers.get(key);
-          if(!t)return interaction.reply({content:'⏱️ キャンセルするタイマーはありません。',ephemeral:true});
-          clearTimeout(t.timeout); userTimers.delete(key);
-          return interaction.reply({content:'🛑 タイマーをキャンセルしました。',ephemeral:true});
+          if(!t)return interaction.editReply('⏱️ キャンセルするタイマーはありません。');
+          clearTimeout(t.timeout); clearInterval(t.interval); userTimers.delete(key);
+          if(t.message?.editable)await t.message.edit({content:'🛑 タイマーをキャンセルしました。'}).catch(()=>{});
+          return interaction.editReply('🛑 タイマーをキャンセルしました。');
         }
         const minutes=interaction.options.getInteger('minutes',true);
-        const old=userTimers.get(key); if(old)clearTimeout(old.timeout);
-        const endsAt=Date.now()+minutes*60_000;
-        const channel=interaction.channel;
+        const old=userTimers.get(key); if(old){clearTimeout(old.timeout);clearInterval(old.interval);}
+        const token=randomUUID(), endsAt=Date.now()+minutes*60_000, channel=interaction.channel, userId=interaction.user.id;
+        const fmt=()=>{const sec=Math.max(0,Math.ceil((endsAt-Date.now())/1000));return `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;};
+        const message=await interaction.editReply({content:`⏱️ **${minutes}分タイマー**\n残り時間: **${fmt()}**\n終了時にこのチャンネルでお知らせします。`});
+        // Discord APIのレート制限を避けつつ、5秒ごとに残り時間を更新。
+        const interval=setInterval(async()=>{
+          const t=userTimers.get(key); if(!t||t.token!==token)return clearInterval(interval);
+          await message.edit({content:`⏱️ **${minutes}分タイマー**\n残り時間: **${fmt()}**\n終了時にこのチャンネルでお知らせします。`}).catch(()=>{});
+        },5000);
         const timeout=setTimeout(async()=>{
-          userTimers.delete(key);
-          await channel?.send(`⏰ <@${interaction.user.id}> **${minutes}分タイマー終了です！**`).catch(()=>{});
+          const t=userTimers.get(key); if(!t||t.token!==token)return;
+          clearInterval(t.interval); userTimers.delete(key);
+          await message.edit({content:`⏰ **${minutes}分タイマー終了！**\n残り時間: **00:00**`}).catch(()=>{});
+          // token照合後の1経路だけで通知するため二重送信しない。
+          await channel?.send(`⏰ <@${userId}> **${minutes}分タイマー終了です！**`).catch(()=>{});
         },minutes*60_000);
-        userTimers.set(key,{timeout,endsAt,minutes,channelId:interaction.channelId});
-        return interaction.reply({content:`⏱️ **${minutes}分** のタイマーを開始しました。\n終了時にこのチャンネルでお知らせします。`,ephemeral:true});
+        userTimers.set(key,{token,timeout,interval,endsAt,minutes,channelId:interaction.channelId,message});
+        return;
       }
 
       if (n === 'era') {
@@ -2458,21 +2475,49 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('ttt:')){
-      const [,gameId,posRaw]=interaction.customId.split(':');
-      const game=ticTacToeGames.get(gameId); const pos=Number(posRaw);
-      if(!game || game.ended)return interaction.reply({content:'❌ このゲームは終了しています。',ephemeral:true});
-      if(!game.players.includes(interaction.user.id))return interaction.reply({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
-      if(game.players[game.turn]!==interaction.user.id)return interaction.reply({content:'⏳ 相手の手番です。',ephemeral:true});
-      if(!Number.isInteger(pos)||pos<0||pos>8||game.board[pos])return interaction.reply({content:'❌ そのマスには置けません。',ephemeral:true});
-      game.board[pos]=game.turn===0?'X':'O';
+      await interaction.deferUpdate().catch(()=>{});
+      const [,gameId,posRaw]=interaction.customId.split(':'); const game=ticTacToeGames.get(gameId),pos=Number(posRaw);
+      if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
+      if(game.players[0]!==interaction.user.id && (!game.bot&&game.players[1]!==interaction.user.id))return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
+      if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
+      if(!Number.isInteger(pos)||pos<0||pos>8||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
       const wins=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-      const win=wins.some(([a,b,c])=>game.board[a]&&game.board[a]===game.board[b]&&game.board[a]===game.board[c]);
-      const draw=!win&&game.board.every(Boolean);
-      if(win||draw)game.ended=true; else game.turn=1-game.turn;
-      const content=win?`🎮 **9面 三目並べ**\n🏆 <@${interaction.user.id}> の勝ち！`:draw?'🎮 **9面 三目並べ**\n🤝 引き分けです。':`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ <@${game.players[1]}>\n現在の手番: <@${game.players[game.turn]}>`;
-      await interaction.update({content,components:game.render()});
-      if(game.ended)setTimeout(()=>ticTacToeGames.delete(gameId),60_000);
-      return;
+      const isWin=m=>wins.some(a=>a.every(i=>game.board[i]===m));
+      game.board[pos]='X'; let winner=isWin('X')?'human':null;
+      if(!winner&&game.board.every(Boolean))game.ended=true;
+      if(!winner&&!game.ended&&game.bot){
+        const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null);
+        const findMove=mark=>empty.find(i=>{game.board[i]=mark;const w=isWin(mark);game.board[i]=null;return w;});
+        const move=findMove('O')??findMove('X')??(game.board[4]?empty[Math.floor(Math.random()*empty.length)]:4);
+        game.board[move]='O'; if(isWin('O'))winner='bot'; else if(game.board.every(Boolean))game.ended=true;
+      }else if(!winner&&!game.ended)game.turn=1-game.turn;
+      if(winner)game.ended=true;
+      const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
+      const content=winner==='human'?`🎮 **9面 三目並べ**\n🏆 <@${game.players[0]}> の勝ち！`:winner==='bot'?`🎮 **9面 三目並べ**\n🤖 BOTの勝ち！`:game.ended?'🎮 **9面 三目並べ**\n🤝 引き分けです。':`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
+      await interaction.editReply({content,components:game.render()}); if(game.ended)setTimeout(()=>ticTacToeGames.delete(gameId),60_000); return;
+    }
+
+    if(interaction.isButton() && interaction.customId.startsWith('gomoku:')){
+      await interaction.deferUpdate().catch(()=>{});
+      const [,gameId,posRaw]=interaction.customId.split(':'); const game=gomokuGames.get(gameId),pos=Number(posRaw);
+      if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
+      if(game.players[0]!==interaction.user.id && (!game.bot&&game.players[1]!==interaction.user.id))return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
+      if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
+      if(!Number.isInteger(pos)||pos<0||pos>24||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
+      const lines=[];for(let r=0;r<5;r++)lines.push([0,1,2,3,4].map(c=>r*5+c));for(let c=0;c<5;c++)lines.push([0,1,2,3,4].map(r=>r*5+c));lines.push([0,6,12,18,24],[4,8,12,16,20]);
+      const isWin=m=>lines.some(a=>a.every(i=>game.board[i]===m));
+      game.board[pos]='X';let winner=isWin('X')?'human':null;
+      if(!winner&&game.board.every(Boolean))game.ended=true;
+      if(!winner&&!game.ended&&game.bot){
+        const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null);
+        const findMove=mark=>empty.find(i=>{game.board[i]=mark;const w=isWin(mark);game.board[i]=null;return w;});
+        const center=12, move=findMove('O')??findMove('X')??(!game.board[center]?center:empty[Math.floor(Math.random()*empty.length)]);
+        game.board[move]='O';if(isWin('O'))winner='bot';else if(game.board.every(Boolean))game.ended=true;
+      }else if(!winner&&!game.ended)game.turn=1-game.turn;
+      if(winner)game.ended=true;
+      const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
+      const content=winner==='human'?`⚫⚪ **5×5 五目並べ**\n🏆 <@${game.players[0]}> の勝ち！`:winner==='bot'?`⚫⚪ **5×5 五目並べ**\n🤖 BOTの勝ち！`:game.ended?'⚫⚪ **5×5 五目並べ**\n🤝 引き分けです。':`⚫⚪ **5×5 五目並べ**\n⚫ <@${game.players[0]}> vs ⚪ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
+      await interaction.editReply({content,components:game.render()});if(game.ended)setTimeout(()=>gomokuGames.delete(gameId),60_000);return;
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('rps:')){
@@ -3003,8 +3048,7 @@ async function playNext(key){
   if(!s||s.playing||!s.queue.length)return;
   const track=s.queue.shift();
   try{
-    const streamUrl=await freshMusicStreamUrl(track.url);
-    const {proc,resource}=createFfmpegAudio(streamUrl);
+    const {proc,resource}=createFfmpegAudio(track.url);
     s.current=track;s.playing=true;s.ffmpeg=proc;s.startedAt=Date.now();
     resource.volume?.setVolume((s.volume??100)/100);recordTrackStart(s.guildId,track);
     proc.on('error',e=>{console.error('ffmpeg process error',e);s.playing=false;s.current=null;s.ffmpeg=null;try{s.player.stop(true);}catch{}});
