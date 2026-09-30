@@ -889,6 +889,24 @@ function rolePanelProblem(guild, role) {
 }
 
 client.on(Events.InteractionCreate, async interaction => {
+  // Discord Interaction は約3秒で初回応答期限が切れるため、/play はこのハンドラの
+  // 文字列整形・ログ出力・他コマンド判定よりも先にACKする。
+  // Windows PowerShellでは大量ログ出力がイベントループを遅らせる場合があるため、
+  // console.log より前に実行することが重要。
+  if (interaction.isChatInputCommand() && interaction.commandName === 'play' && !interaction.deferred && !interaction.replied) {
+    const age = Date.now() - interaction.createdTimestamp;
+    try {
+      await interaction.deferReply();
+      console.log(`⚡ /play 最優先ACK完了: ${interaction.id} / 受信時 ${age}ms`);
+    } catch (e) {
+      if (e?.code === 10062) {
+        console.warn(`⚠️ /play Discord到着時点でACK期限切れ: ${interaction.id} / ${age}ms`);
+        return;
+      }
+      throw e;
+    }
+  }
+
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
   try {
     if (interaction.isAutocomplete()) {
@@ -896,20 +914,6 @@ client.on(Events.InteractionCreate, async interaction => {
         ? searchPrefectureChoices(interaction.options.getFocused())
         : searchRegionChoices(interaction.options.getFocused());
       return interaction.respond(choices);
-    }
-
-    // /play は検索・VC処理より前に最優先でACKし、Discordの3秒制限を回避する。
-    if (interaction.isChatInputCommand() && interaction.commandName === 'play' && !interaction.deferred && !interaction.replied) {
-      try {
-        await interaction.deferReply();
-        console.log(`⚡ /play ACK完了: ${interaction.id}`);
-      } catch (e) {
-        if (e?.code === 10062) {
-          console.warn(`⚠️ /play ACK期限切れ: ${interaction.id}`);
-          return;
-        }
-        throw e;
-      }
     }
 
     // 音楽プレイヤーボタンは他の処理より先にACKする。
