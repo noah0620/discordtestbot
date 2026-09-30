@@ -335,8 +335,13 @@ export const commandData = [
       .addAttachmentOption(o=>o.setName('image').setDescription('背景を透過する画像').setRequired(true)))
     .addSubcommand(sc=>sc.setName('pdf').setDescription('画像ファイルをPDFに変換')
       .addAttachmentOption(o=>o.setName('image').setDescription('PDFに変換する画像').setRequired(true)))
-    .addSubcommand(sc=>sc.setName('compress').setDescription('画像を5MB以下に自動圧縮')
-      .addAttachmentOption(o=>o.setName('image').setDescription('5MB以下に圧縮する画像').setRequired(true)))
+    .addSubcommand(sc=>sc.setName('compress').setDescription('Discordプラン別の上限サイズに画像を自動圧縮')
+      .addAttachmentOption(o=>o.setName('image').setDescription('圧縮する画像').setRequired(true))
+      .addStringOption(o=>o.setName('plan').setDescription('圧縮先サイズを選択').setRequired(true).addChoices(
+        {name:'通常プラン（20MB）',value:'normal'},
+        {name:'Nitro Basic（50MB）',value:'basic'},
+        {name:'Nitro（1GB）',value:'nitro'}
+      )))
     .addSubcommand(sc=>sc.setName('video-compress').setDescription('動画を5MB以下に自動圧縮してMP4に変換')
       .addAttachmentOption(o=>o.setName('video').setDescription('5MB以下に圧縮する動画').setRequired(true)))
     .addSubcommand(sc=>sc.setName('enhance').setDescription('画像を高画質化・拡大')

@@ -322,31 +322,21 @@ async function enhanceImage(buffer,outPath,scale){
   const width=Math.min((meta.width||1)*scale,12000),height=Math.min((meta.height||1)*scale,12000);
   await img.resize({width,height,fit:'fill',kernel:sharp.kernel.lanczos3}).sharpen({sigma:1}).png({compressionLevel:6}).toFile(outPath);
 }
-async function compressImageTo5Mb(buffer,outPath){
-  const limit=5*1024*1024;
-  if(buffer.length<=limit){
-    await fs.writeFile(outPath,buffer);
-    return {unchanged:true,size:buffer.length};
-  }
-  const base=sharp(buffer,{animated:false}).rotate().flatten({background:'#ffffff'});
-  const meta=await base.metadata();
-  let width=meta.width||1920;
-  let quality=92;
-  let scale=1;
-  let best=null;
-  for(let attempt=0;attempt<30;attempt++){
+async function compressImageToLimit(buffer,outPath,limitMb){
+  const limit=Math.max(1,Number(limitMb)||20)*1024*1024;
+  if(buffer.length<=limit){await fs.writeFile(outPath,buffer);return {unchanged:true,size:buffer.length};}
+  const meta=await sharp(buffer,{animated:false}).rotate().metadata();
+  const width=meta.width||1920; let quality=94,scale=1,best=null;
+  for(let attempt=0;attempt<40;attempt++){
     const targetWidth=Math.max(320,Math.round(width*scale));
     const candidate=await sharp(buffer,{animated:false}).rotate().flatten({background:'#ffffff'})
       .resize({width:targetWidth,withoutEnlargement:true,kernel:sharp.kernel.lanczos3})
-      .jpeg({quality,mozjpeg:true,chromaSubsampling:'4:2:0'})
-      .toBuffer();
+      .jpeg({quality,mozjpeg:true,chromaSubsampling:'4:2:0'}).toBuffer();
     if(candidate.length<=limit){best=candidate;break;}
-    if(quality>55) quality-=7;
-    else {scale*=0.88;quality=82;}
+    if(quality>55)quality-=6;else{scale*=0.88;quality=84;}
   }
-  if(!best)throw new Error('5MB以下まで圧縮できませんでした。元画像の解像度を下げて再度お試しください。');
-  await fs.writeFile(outPath,best);
-  return {unchanged:false,size:best.length};
+  if(!best)throw new Error(`${limitMb}MB以下まで圧縮できませんでした。元画像の解像度を下げて再度お試しください。`);
+  await fs.writeFile(outPath,best);return {unchanged:false,size:best.length};
 }
 async function removeImageBackground(buffer,outPath){
   const {removeBackground}=await import('@imgly/background-removal-node');
@@ -358,7 +348,7 @@ async function sendImageResult(interaction,work,label){
   await interaction.deferReply({ephemeral:true});let dir=null;
   try{
     dir=await makeTempImageDir();const result=await work(dir);const st=await fs.stat(result.path);
-    const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
+    const maxBytes=Number(result.maxUploadMb||process.env.DISCORD_UPLOAD_MAX_MB||20)*1024*1024;
     if(st.size>maxBytes)return interaction.editReply(`❌ 処理は完了しましたが、出力ファイルが ${(st.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定を超えています。`);
     return interaction.editReply({content:`✅ ${label} 完了${result.message?`\n${result.message}`:''}`,files:[{attachment:result.path,name:result.name}]});
   }catch(e){console.error(label,e);return interaction.editReply(`❌ ${label}に失敗しました。\n${String(e.message||e).slice(0,900)}`);}
@@ -2260,9 +2250,10 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (n === 'play') {
+        await interaction.deferReply().catch(e=>{if(e?.code!==10062)throw e;});
+        if(!interaction.deferred&&!interaction.replied)return;
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
-        if(!vc)return interaction.reply({content:'❌ 先にボイスチャンネルへ参加してください。',ephemeral:true});
-        await interaction.deferReply();
+        if(!vc)return interaction.editReply('❌ 先にボイスチャンネルへ参加してください。');
         try{
           const track=await resolveMusicTrack(input);const sess=await createMusicSession(interaction,vc);
           sess.queue.push({...track,requesterId:interaction.user.id});
@@ -2293,15 +2284,19 @@ client.on(Events.InteractionCreate, async interaction => {
         const sub=interaction.options.getSubcommand(true);
         if (sub === 'compress') {
           const att=interaction.options.getAttachment('image',true);
+          const plan=interaction.options.getString('plan',true);
+          const limits={normal:20,basic:50,nitro:1024};
+          const labels={normal:'通常プラン',basic:'Nitro Basic',nitro:'Nitro'};
+          const limitMb=limits[plan]||20;
           return sendImageResult(interaction,async dir=>{
-            const b=await fetchAttachmentBuffer(att,50);
+            const b=await fetchAttachmentBuffer(att,limitMb);
             const originalExt=(path.extname(att.name||'')||'.jpg').toLowerCase();
-            const alreadySmall=b.length<=5*1024*1024;
+            const alreadySmall=b.length<=limitMb*1024*1024;
             const out=path.join(dir,alreadySmall?`compressed${originalExt}`:'compressed.jpg');
-            const info=await compressImageTo5Mb(b,out);
+            const info=await compressImageToLimit(b,out,limitMb);
             const mb=(info.size/1024/1024).toFixed(2);
-            return {path:out,name:`${path.parse(att.name||'image').name}_5MB${alreadySmall?originalExt:'.jpg'}`,message:info.unchanged?`元画像はすでに5MB以下です（${mb}MB）`:`${mb}MBまで圧縮しました`};
-          },'画像5MB圧縮');
+            return {path:out,name:`${path.parse(att.name||'image').name}_${limitMb}MB${alreadySmall?originalExt:'.jpg'}`,maxUploadMb:limitMb,message:info.unchanged?`元画像はすでに${limitMb}MB以下です（${mb}MB）`:`${labels[plan]}向けに${limitMb}MB以下へ圧縮しました（${mb}MB）`};
+          },`画像圧縮（${labels[plan]} / ${limitMb}MB）`);
         }
         if (sub === 'video-compress') {
           const att=interaction.options.getAttachment('video',true);
@@ -2340,7 +2335,7 @@ client.on(Events.InteractionCreate, async interaction => {
         let result=null;
         try{
           result=await downloadSocialMedia(url,format);
-          const maxBytes=Number(process.env.DISCORD_UPLOAD_MAX_MB||10)*1024*1024;
+          const maxBytes=Number(result.maxUploadMb||process.env.DISCORD_UPLOAD_MAX_MB||20)*1024*1024;
           if(result.size>maxBytes){
             return interaction.editReply(`❌ 変換は完了しましたが、ファイルが ${(result.size/1024/1024).toFixed(1)}MB ありDiscordへの添付上限設定（${process.env.DISCORD_UPLOAD_MAX_MB||10}MB）を超えています。\n.env の DISCORD_UPLOAD_MAX_MB は、実際に利用できるDiscord添付上限に合わせて変更できます。`);
           }
