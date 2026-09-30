@@ -898,6 +898,49 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.respond(choices);
     }
 
+    // /play は検索・VC処理より前に最優先でACKし、Discordの3秒制限を回避する。
+    if (interaction.isChatInputCommand() && interaction.commandName === 'play' && !interaction.deferred && !interaction.replied) {
+      try {
+        await interaction.deferReply();
+        console.log(`⚡ /play ACK完了: ${interaction.id}`);
+      } catch (e) {
+        if (e?.code === 10062) {
+          console.warn(`⚠️ /play ACK期限切れ: ${interaction.id}`);
+          return;
+        }
+        throw e;
+      }
+    }
+
+    // 音楽プレイヤーボタンは他の処理より先にACKする。
+    if (interaction.isButton() && interaction.customId.startsWith('music:')) {
+      try {
+        await interaction.deferUpdate();
+      } catch (e) {
+        if (e?.code === 10062) {
+          console.warn(`⚠️ music button ACK期限切れ: ${interaction.customId} / ${interaction.id}`);
+          return;
+        }
+        throw e;
+      }
+      const action=interaction.customId.split(':')[1];
+      const s=sessionForInteraction(interaction);
+      if(action==='leave'){
+        if(!s){ await interaction.followUp({content:'❌ このBOTと同じVCに参加してください。',ephemeral:true}); return; }
+        s.queue.length=0; try{s.ffmpeg?.kill('SIGKILL');}catch{}; try{s.player.stop(true);}catch{}; try{s.connection.destroy();}catch{}; players.delete(s.key);
+        await interaction.followUp({content:'🚪 ボイスチャンネルから退出しました。',ephemeral:true}); return;
+      }
+      if(action==='stop'){
+        if(s){ s.queue.length=0; try{s.ffmpeg?.kill();}catch{}; try{s.player.stop(true);}catch{}; try{s.connection.destroy();}catch{}; players.delete(s.key); }
+        await interaction.followUp({content:'⏹️ 再生を停止しました。',ephemeral:true}); return;
+      }
+      if(!s){ await interaction.followUp({content:'現在再生中の音楽はありません。',ephemeral:true}); return; }
+      if(action==='pause'){ s.player.pause(); await interaction.followUp({content:'⏸️ 一時停止しました。',ephemeral:true}); return; }
+      if(action==='resume'){ s.player.unpause(); await interaction.followUp({content:'▶️ 再開しました。',ephemeral:true}); return; }
+      if(action==='skip'){ s.player.stop(true); await interaction.followUp({content:'⏭️ スキップしました。',ephemeral:true}); return; }
+      return;
+    }
+
     if (interaction.isChatInputCommand()) {
       let n = interaction.commandName;
       // 関連機能をサブコマンドへ統合（内部では既存処理を再利用）
@@ -2250,8 +2293,10 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (n === 'play') {
-        await interaction.deferReply().catch(e=>{if(e?.code!==10062)throw e;});
-        if(!interaction.deferred&&!interaction.replied)return;
+        // InteractionCreate直後ですでにdeferReply済み。ここでは二重ACKしない。
+        if(!interaction.deferred&&!interaction.replied){
+          try{ await interaction.deferReply(); }catch(e){ if(e?.code===10062)return; throw e; }
+        }
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
         if(!vc)return interaction.editReply('❌ 先にボイスチャンネルへ参加してください。');
         try{
@@ -2766,28 +2811,6 @@ client.on(Events.InteractionCreate, async interaction => {
             ephemeral:true
           });
         }
-      }
-      if (kind === 'music') {
-        const s=sessionForInteraction(interaction);
-        if(a==='leave'){
-          if(!s)return interaction.reply({content:'❌ このBOTと同じVCに参加してください。',ephemeral:true});
-          s.queue.length=0;try{s.ffmpeg?.kill('SIGKILL');}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
-          return interaction.reply({content:'🚪 ボイスチャンネルから退出しました。',ephemeral:true});
-        }
-        if(a==='stop'){
-          if(s){
-            s.queue.length=0;
-            try{s.ffmpeg?.kill();}catch{}
-            s.player.stop(true);
-            try{s.connection.destroy();}catch{}
-            players.delete(s.key);
-          }
-          return interaction.reply({content:'⏹️ 再生を停止しました。',ephemeral:true});
-        }
-        if(!s)return interaction.reply({content:'現在再生中の音楽はありません。',ephemeral:true});
-        if(a==='pause'){s.player.pause();return interaction.reply({content:'⏸️ 一時停止しました。',ephemeral:true});}
-        if(a==='resume'){s.player.unpause();return interaction.reply({content:'▶️ 再開しました。',ephemeral:true});}
-        if(a==='skip'){s.player.stop(true);return interaction.reply({content:'⏭️ スキップしました。',ephemeral:true});}
       }
 
       if (kind === 'ticket' && a === 'create') {
