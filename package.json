@@ -1,6 +1,6 @@
 {
   "name": "discord-multibot-v5-14-5-auto-watchers-fixed",
-  "version": "6.0.24",
+  "version": "6.0.26",
   "description": "Discord MultiBot v5.9 - enhanced vending, purchase tickets, sales feed and social profile RSS.",
   "type": "module",
   "main": "src/index.js",
@@ -23,6 +23,7 @@
     "sharp": "^0.34.4",
     "pdfkit": "^0.17.2",
     "@imgly/background-removal-node": "1.4.5",
-    "play-dl": "^1.9.7"
+    "play-dl": "^1.9.7",
+    "chess.js": "^1.4.0"
   }
 }

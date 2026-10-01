@@ -322,6 +322,12 @@ export const commandData = [
     .addSubcommand(sc=>sc.setName('gomoku').setDescription('5×5の五目並べ（対人/BOT対戦）')
       .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
     .addSubcommand(sc=>sc.setName('rps').setDescription('じゃんけん（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
+    .addSubcommand(sc=>sc.setName('othello').setDescription('オセロ（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
+    .addSubcommand(sc=>sc.setName('chess').setDescription('チェス（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
+    .addSubcommand(sc=>sc.setName('shogi').setDescription('将棋（対人/BOT対戦）')
       .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false))),
   new SlashCommandBuilder().setName('points').setDescription('ポイントカード・チャットポイント')
     .addSubcommand(sc=>sc.setName('balance').setDescription('自分または指定ユーザーのポイントを確認').addUserOption(o=>o.setName('user').setDescription('確認するユーザー')))

@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
 import play from 'play-dl';
+import { Chess } from 'chess.js';
 import fsSync from 'node:fs';
 import Parser from 'rss-parser';
 import sharp from 'sharp';
@@ -130,6 +131,7 @@ const musicBotClients=[];
 const pendingRoleCreates = new Map();
 const ticTacToeGames = new Map();
 const gomokuGames = new Map();
+const boardGames = new Map();
 const userTimers = new Map();
 const chatPointCooldowns = new Map();
 const rpsGames = new Map();
@@ -908,6 +910,29 @@ function rolePanelProblem(guild, role) {
   return null;
 }
 
+
+function gameInputRow(id,label='指し手を入力'){
+  return new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`boardmove:${id}`).setLabel(`🎯 ${label}`).setStyle(ButtonStyle.Primary));
+}
+function othelloLegal(board,side){
+  const dirs=[-1,1,-8,8,-9,-7,7,9], out=[];
+  for(let i=0;i<64;i++){ if(board[i])continue; const flips=[];
+    for(const d of dirs){ let j=i+d, line=[]; const stepOk=(a,b)=>Math.abs((a%8)-(b%8))<=1;
+      while(j>=0&&j<64&&stepOk(j-d,j)&&board[j]&&board[j]!==side){line.push(j);j+=d;}
+      if(line.length&&j>=0&&j<64&&stepOk(j-d,j)&&board[j]===side)flips.push(...line);
+    } if(flips.length)out.push({i,flips});
+  } return out;
+}
+function renderOthello(g){const f='abcdefgh';let t='   '+f.split('').join(' ')+'\n';for(let r=0;r<8;r++)t+=`${r+1}  `+g.board.slice(r*8,r*8+8).map(x=>x==='B'?'⚫':x==='W'?'⚪':'·').join(' ')+'\n';return '```\n'+t+'```';}
+function renderChess(g){const b=g.chess.board(),pc={p:'♟',r:'♜',n:'♞',b:'♝',q:'♛',k:'♚'};let t='   a b c d e f g h\n';for(let r=0;r<8;r++){t+=(8-r)+'  '+b[r].map(x=>x?(x.color==='w'?({p:'♙',r:'♖',n:'♘',b:'♗',q:'♕',k:'♔'}[x.type]):pc[x.type]):'·').join(' ')+'\n';}return '```\n'+t+'```';}
+const SHOGI_START=['香','桂','銀','金','王','金','銀','桂','香','・飛・・・・・角・','歩歩歩歩歩歩歩歩歩','・・・・・・・・・','・・・・・・・・・','・・・・・・・・・','歩歩歩歩歩歩歩歩歩','・角・・・・・飛・','香桂銀金玉金銀桂香'];
+function newShogi(){const rows=[['香','桂','銀','金','王','金','銀','桂','香'],['・','飛','・','・','・','・','・','角','・'],Array(9).fill('歩'),...Array.from({length:3},()=>Array(9).fill('・')),Array(9).fill('歩'),['・','角','・','・','・','・','・','飛','・'],['香','桂','銀','金','玉','金','銀','桂','香']];return rows.map((r,y)=>r.map((p,x)=>p==='・'?null:{p,side:y<3?'w':'b'}));}
+function renderShogi(g){let t='    9 8 7 6 5 4 3 2 1\n';for(let y=0;y<9;y++)t+=`${'abcdefghi'[y]}  `+g.board[y].slice().reverse().map(x=>x?(x.side==='b'?x.p:`v${x.p}`):'・').join(' ')+'\n';return '```\n'+t+'```';}
+function shogiCoord(s){const m=String(s).toLowerCase().match(/^([1-9])([a-i])([1-9])([a-i])$/);if(!m)return null;return {fx:9-+m[1],fy:'abcdefghi'.indexOf(m[2]),tx:9-+m[3],ty:'abcdefghi'.indexOf(m[4])};}
+function shogiPseudoLegal(g,m,side){const a=g.board[m.fy]?.[m.fx],d=g.board[m.ty]?.[m.tx];if(!a||a.side!==side||d?.side===side)return false;const dx=m.tx-m.fx,dy=m.ty-m.fy,fw=side==='b'?-1:1,p=a.p;const clear=()=>{const sx=Math.sign(dx),sy=Math.sign(dy);let x=m.fx+sx,y=m.fy+sy;while(x!==m.tx||y!==m.ty){if(g.board[y][x])return false;x+=sx;y+=sy;}return true;};if(p==='歩')return dx===0&&dy===fw;if(p==='王'||p==='玉')return Math.max(Math.abs(dx),Math.abs(dy))===1;if(p==='金')return [[0,fw],[1,fw],[-1,fw],[1,0],[-1,0],[0,-fw]].some(([x,y])=>dx===x&&dy===y);if(p==='銀')return [[0,fw],[1,fw],[-1,fw],[1,-fw],[-1,-fw]].some(([x,y])=>dx===x&&dy===y);if(p==='桂')return Math.abs(dx)===1&&dy===2*fw;if(p==='香')return dx===0&&Math.sign(dy)===fw&&clear();if(p==='飛')return (dx===0||dy===0)&&clear();if(p==='角')return Math.abs(dx)===Math.abs(dy)&&clear();return false;}
+function shogiMoves(g,side){const out=[];for(let fy=0;fy<9;fy++)for(let fx=0;fx<9;fx++)for(let ty=0;ty<9;ty++)for(let tx=0;tx<9;tx++){const m={fx,fy,tx,ty};if(shogiPseudoLegal(g,m,side))out.push(m);}return out;}
+function boardContent(g){const p2=g.bot?'🤖 BOT':`<@${g.players[1]}>`;if(g.type==='othello'){const b=g.board.filter(x=>x==='B').length,w=g.board.filter(x=>x==='W').length;return `⚫⚪ **オセロ**\n⚫ <@${g.players[0]}> vs ⚪ ${p2}\n${renderOthello(g)}\n手番: ${g.turn===0?`<@${g.players[0]}>`:p2} / ⚫${b} ⚪${w}`;}if(g.type==='chess')return `♟️ **チェス**\n白 <@${g.players[0]}> vs 黒 ${p2}\n${renderChess(g)}\n手番: ${g.chess.turn()==='w'?`<@${g.players[0]}>`:p2}`;return `☗ **将棋**\n先手 <@${g.players[0]}> vs 後手 ${p2}\n${renderShogi(g)}\n手番: ${g.turn===0?`<@${g.players[0]}>`:p2}`;}
+
 client.on(Events.InteractionCreate, async interaction => {
   // Discord Interaction は約3秒で初回応答期限が切れるため、/play はこのハンドラの
   // 文字列整形・ログ出力・他コマンド判定よりも先にACKする。
@@ -920,7 +945,7 @@ client.on(Events.InteractionCreate, async interaction => {
       console.log(`⚡ /play 最優先ACK完了: ${interaction.id} / 受信時 ${age}ms`);
     } catch (e) {
       if (e?.code === 10062) {
-        console.warn(`⚠️ /play Discord到着時点でACK期限切れ: ${interaction.id} / ${age}ms`);
+        console.warn(`⚠️ /play ACK失敗(Discord 10062): ${interaction.id} / BOT受信時 ${age}ms ※受信時刻だけでは期限切れ判定しません`);
         return;
       }
       throw e;
@@ -949,6 +974,32 @@ client.on(Events.InteractionCreate, async interaction => {
       const win=(a==='rock'&&b==='scissors')||(a==='scissors'&&b==='paper')||(a==='paper'&&b==='rock');
       const result=a===b?'🤝 引き分け':win?`🏆 <@${g.players[0]}> の勝ち！`:`🏆 ${g.bot?'BOT':`<@${g.players[1]}>`} の勝ち！`;
       rpsGames.delete(id); return interaction.message.edit({content:`🎮 **じゃんけん結果**\n<@${g.players[0]}>: ${label[a]}\n${g.bot?'🤖 BOT':`<@${g.players[1]}>`}: ${label[b]}\n${result}`,components:[]});
+    }
+
+    if(interaction.isButton()&&interaction.customId.startsWith('boardmove:')){
+      const id=interaction.customId.split(':')[1],g=boardGames.get(id);if(!g)return interaction.reply({content:'❌ この対局は終了しています。',ephemeral:true});
+      const expected=g.type==='chess'?(g.chess.turn()==='w'?g.players[0]:g.players[1]):g.players[g.turn];if(interaction.user.id!==expected)return interaction.reply({content:'❌ あなたの手番ではありません。',ephemeral:true});
+      const modal=new ModalBuilder().setCustomId(`boardmodal:${id}`).setTitle(g.type==='othello'?'オセロの手':g.type==='chess'?'チェスの手':'将棋の手');
+      const hint=g.type==='othello'?'例: d3':g.type==='chess'?'例: e2e4 / e7e8q':'例: 7g7f';
+      modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('move').setLabel(hint).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(8)));return interaction.showModal(modal);
+    }
+    if(interaction.isModalSubmit()&&interaction.customId.startsWith('boardmodal:')){
+      const id=interaction.customId.split(':')[1],g=boardGames.get(id);await interaction.deferReply({ephemeral:true});if(!g)return interaction.editReply('❌ この対局は終了しています。');
+      const raw=interaction.fields.getTextInputValue('move').trim().toLowerCase();let result='';
+      if(g.type==='othello'){
+        const m=raw.match(/^([a-h])([1-8])$/),side=g.turn===0?'B':'W';if(!m)return interaction.editReply('❌ `d3` の形式で入力してください。');const i=(+m[2]-1)*8+'abcdefgh'.indexOf(m[1]),mv=othelloLegal(g.board,side).find(x=>x.i===i);if(!mv)return interaction.editReply('❌ そこには置けません。');g.board[i]=side;mv.flips.forEach(x=>g.board[x]=side);g.turn=1-g.turn;
+        const next=g.turn===0?'B':'W';if(!othelloLegal(g.board,next).length){g.turn=1-g.turn;if(!othelloLegal(g.board,g.turn===0?'B':'W').length)g.ended=true;}
+        if(g.bot&&!g.ended&&g.turn===1){const ms=othelloLegal(g.board,'W');if(ms.length){const b=ms[Math.floor(Math.random()*ms.length)];g.board[b.i]='W';b.flips.forEach(x=>g.board[x]='W');}g.turn=0;if(!othelloLegal(g.board,'B').length&&!othelloLegal(g.board,'W').length)g.ended=true;}
+        if(g.ended){const b=g.board.filter(x=>x==='B').length,w=g.board.filter(x=>x==='W').length;result=b===w?'🤝 引き分け':b>w?`🏆 <@${g.players[0]}> の勝ち！`:`🏆 ${g.bot?'BOT':`<@${g.players[1]}>`} の勝ち！`;}
+      }else if(g.type==='chess'){
+        try{const mv=g.chess.move({from:raw.slice(0,2),to:raw.slice(2,4),promotion:raw[4]||'q'});if(!mv)return interaction.editReply('❌ その手は指せません。');}catch{return interaction.editReply('❌ `e2e4` の形式で合法手を入力してください。');}
+        if(g.chess.isGameOver())g.ended=true;else if(g.bot&&g.chess.turn()==='b'){const ms=g.chess.moves({verbose:true}),m=ms[Math.floor(Math.random()*ms.length)];if(m)g.chess.move(m);if(g.chess.isGameOver())g.ended=true;}
+        if(g.ended)result=g.chess.isCheckmate()?`🏆 チェックメイト！ ${g.chess.turn()==='w'?(g.bot?'BOT':`<@${g.players[1]}>`):`<@${g.players[0]}>`} の勝ち！`:'🤝 対局終了（引き分け）';
+      }else{
+        const m=shogiCoord(raw),side=g.turn===0?'b':'w';if(!m||!shogiPseudoLegal(g,m,side))return interaction.editReply('❌ `7g7f` の形式で合法手を入力してください。');const captured=g.board[m.ty][m.tx];g.board[m.ty][m.tx]=g.board[m.fy][m.fx];g.board[m.fy][m.fx]=null;if(captured&&['王','玉'].includes(captured.p)){g.ended=true;result=`🏆 <@${g.players[g.turn]}> の勝ち！`;}else g.turn=1-g.turn;
+        if(g.bot&&!g.ended&&g.turn===1){const ms=shogiMoves(g,'w'),bm=ms[Math.floor(Math.random()*ms.length)];if(bm){const cap=g.board[bm.ty][bm.tx];g.board[bm.ty][bm.tx]=g.board[bm.fy][bm.fx];g.board[bm.fy][bm.fx]=null;if(cap&&['王','玉'].includes(cap.p)){g.ended=true;result='🏆 BOTの勝ち！';}else g.turn=0;}}
+      }
+      const msg=interaction.message;await msg.edit({content:boardContent(g)+(result?`\n${result}`:''),components:g.ended?[]:[gameInputRow(id)]}).catch(()=>{});if(g.ended)boardGames.delete(id);return interaction.editReply('✅ 指し手を反映しました。');
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('music:')) {
@@ -1069,6 +1120,15 @@ client.on(Events.InteractionCreate, async interaction => {
           const msg=await interaction.editReply({content:`⚫⚪ **5×5 五目並べ**\n⚫ <@${game.players[0]}> vs ⚪ ${who}\n現在の手番: <@${game.players[0]}>`,components:game.render()});
           game.messageId=msg.id; return;
         }
+        if(['othello','chess','shogi'].includes(sub)){
+          if(opponent?.id===interaction.user.id)return interaction.editReply('❌ 自分自身とは対戦できません。');
+          if(opponent?.bot)return interaction.editReply('❌ BOT対戦は対戦相手を指定せず実行してください。');
+          const id=randomUUID().slice(0,8),g={id,type:sub,players:[interaction.user.id,opponent?.id||client.user.id],bot:!opponent,turn:0,ended:false};
+          if(sub==='othello'){g.board=Array(64).fill(null);g.board[27]='W';g.board[28]='B';g.board[35]='B';g.board[36]='W';}
+          if(sub==='chess')g.chess=new Chess();
+          if(sub==='shogi')g.board=newShogi();
+          boardGames.set(id,g);return interaction.editReply({content:boardContent(g),components:[gameInputRow(id)]});
+        }
         if(sub==='rps'){
           const id=randomUUID().slice(0,8);
           const row=new ActionRowBuilder().addComponents(
@@ -1100,13 +1160,27 @@ client.on(Events.InteractionCreate, async interaction => {
         const minutes=interaction.options.getInteger('minutes',true);
         const old=userTimers.get(key); if(old){clearTimeout(old.timeout);clearInterval(old.interval);}
         const token=randomUUID(), endsAt=Date.now()+minutes*60_000, channel=interaction.channel, userId=interaction.user.id;
-        const fmt=()=>{const sec=Math.max(0,Math.ceil((endsAt-Date.now())/1000));return `${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;};
-        const message=await interaction.editReply({content:`⏱️ **${minutes}分タイマー**\n残り時間: **${fmt()}**\n終了時にこのチャンネルでお知らせします。`});
-        // Discord APIのレート制限を避けつつ、5秒ごとに残り時間を更新。
+        const totalSec=minutes*60;
+        const timerView=()=>{
+          const sec=Math.max(0,Math.ceil((endsAt-Date.now())/1000));
+          const time=`${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
+          const ratio=totalSec>0?Math.max(0,Math.min(1,sec/totalSec)):0;
+          const filled=Math.round(ratio*20);
+          const bar='█'.repeat(filled)+'░'.repeat(20-filled);
+          return `⏱️ **${minutes}分タイマー**\n残り時間: **${time}**\n${bar}\n終了時にこのチャンネルでお知らせします。`;
+        };
+        const message=await interaction.editReply({content:timerView()});
+        // 約1秒ごとに同じメッセージを書き換え、残り時間をリアルタイム表示する。
+        // 更新が重なったりレート制限になった場合は次のtickまで待ち、タイマー本体は止めない。
+        let updating=false;
         const interval=setInterval(async()=>{
           const t=userTimers.get(key); if(!t||t.token!==token)return clearInterval(interval);
-          await message.edit({content:`⏱️ **${minutes}分タイマー**\n残り時間: **${fmt()}**\n終了時にこのチャンネルでお知らせします。`}).catch(()=>{});
-        },5000);
+          if(updating)return;
+          updating=true;
+          try{ await message.edit({content:timerView()}); }catch(e){
+            if(e?.code!==10008 && e?.status!==429) console.warn('⚠️ タイマー表示更新失敗:',e?.code||e?.message||e);
+          }finally{ updating=false; }
+        },1000);
         const timeout=setTimeout(async()=>{
           const t=userTimers.get(key); if(!t||t.token!==token)return;
           clearInterval(t.interval); userTimers.delete(key);
