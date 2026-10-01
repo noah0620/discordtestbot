@@ -36,6 +36,7 @@ const HELP_CATEGORIES = [
   { id:'era', label:'西暦・和暦・年号検索', emoji:'📅', test:n=>n==='era' },
   { id:'game', label:'ゲーム', emoji:'🎮', test:n=>n==='game' },
   { id:'timer', label:'タイマー', emoji:'⏱️', test:n=>n==='timer' },
+  { id:'points', label:'ポイント・チャットランク・宝くじ', emoji:'💳', test:n=>['points','chat-rank','lottery'].includes(n) },
 ];
 
 function helpCommandLines(categoryId){
@@ -130,6 +131,25 @@ const pendingRoleCreates = new Map();
 const ticTacToeGames = new Map();
 const gomokuGames = new Map();
 const userTimers = new Map();
+const chatPointCooldowns = new Map();
+const rpsGames = new Map();
+
+function economyGuild(guildId){
+  const g=guildData(store,guildId);
+  g.economy??={}; g.economy.pointsPerMessage??=1; g.economy.cooldownSeconds??=60;
+  g.economy.users??={};
+  g.economy.lottery??={ticketPrice:100,firstPrize:10000,secondPrize:2000,thirdPrize:500};
+  return g.economy;
+}
+function economyUser(guildId,userId){
+  const e=economyGuild(guildId);
+  e.users[userId]??={points:0,messages:0,xp:0};
+  return e.users[userId];
+}
+function chatLevel(xp){ return Math.max(0,Math.floor(Math.sqrt(Math.max(0,xp)/10))); }
+function chatNextXp(level){ return (level+1)*(level+1)*10; }
+function pointText(n){return `${Number(n||0).toLocaleString('ja-JP')}pt`;}
+
 process.on('unhandledRejection',e=>console.error('⚠️ unhandledRejection (BOT継続):',e));
 process.on('uncaughtException',e=>console.error('⚠️ uncaughtException (BOT継続):',e));
 
@@ -917,6 +937,20 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     // 音楽プレイヤーボタンは他の処理より先にACKする。
+    if(interaction.isButton() && interaction.customId.startsWith('rps2:')){
+      await interaction.deferUpdate().catch(()=>{}); const [,id,choice]=interaction.customId.split(':'),g=rpsGames.get(id);
+      if(!g)return interaction.followUp({content:'❌ この対戦は終了しています。',ephemeral:true});
+      if(!g.players.includes(interaction.user.id) || interaction.user.id===client.user.id)return interaction.followUp({content:'❌ 対戦者だけが選択できます。',ephemeral:true});
+      if(g.choices[interaction.user.id])return interaction.followUp({content:'✅ すでに手を選択済みです。',ephemeral:true});
+      g.choices[interaction.user.id]=choice;
+      if(g.bot){g.choices[client.user.id]=['rock','scissors','paper'][Math.floor(Math.random()*3)];}
+      if(!g.choices[g.players[0]]||!g.choices[g.players[1]])return interaction.followUp({content:'✅ 手を選びました。相手の選択を待っています。',ephemeral:true});
+      const a=g.choices[g.players[0]],b=g.choices[g.players[1]],label={rock:'✊ グー',scissors:'✌️ チョキ',paper:'✋ パー'};
+      const win=(a==='rock'&&b==='scissors')||(a==='scissors'&&b==='paper')||(a==='paper'&&b==='rock');
+      const result=a===b?'🤝 引き分け':win?`🏆 <@${g.players[0]}> の勝ち！`:`🏆 ${g.bot?'BOT':`<@${g.players[1]}>`} の勝ち！`;
+      rpsGames.delete(id); return interaction.message.edit({content:`🎮 **じゃんけん結果**\n<@${g.players[0]}>: ${label[a]}\n${g.bot?'🤖 BOT':`<@${g.players[1]}>`}: ${label[b]}\n${result}`,components:[]});
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith('music:')) {
       try {
         await interaction.deferUpdate();
@@ -966,6 +1000,49 @@ client.on(Events.InteractionCreate, async interaction => {
         });
       }
 
+
+      if (n === 'points') {
+        const sub=interaction.options.getSubcommand();
+        if(sub==='settings'){
+          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return interaction.reply({content:'❌ サーバー管理権限が必要です。',ephemeral:true});
+          const e=economyGuild(interaction.guildId); e.pointsPerMessage=interaction.options.getInteger('per_message',true); e.cooldownSeconds=interaction.options.getInteger('cooldown_seconds')??60; saveStore(store);
+          return interaction.reply({content:`✅ チャットポイントを **1回 ${e.pointsPerMessage}pt** / **${e.cooldownSeconds}秒ごと** に設定しました。`,ephemeral:true});
+        }
+        if(sub==='balance'){
+          const u=interaction.options.getUser('user')||interaction.user, d=economyUser(interaction.guildId,u.id);
+          return interaction.reply({content:`💳 **${u.username} のポイントカード**\n残高: **${pointText(d.points)}**\nチャット数: **${d.messages.toLocaleString()}**`,ephemeral:true});
+        }
+        const e=economyGuild(interaction.guildId), top=Object.entries(e.users).sort((a,b)=>(b[1].points||0)-(a[1].points||0)).slice(0,10);
+        return interaction.reply({content:`💳 **ポイントランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **${pointText(d.points)}**`).join('\n')||'まだデータがありません。'}`});
+      }
+
+      if (n === 'chat-rank') {
+        const sub=interaction.options.getSubcommand();
+        if(sub==='me'){
+          const u=interaction.options.getUser('user')||interaction.user,d=economyUser(interaction.guildId,u.id),lv=chatLevel(d.xp);
+          return interaction.reply({content:`💬 **${u.username} のチャットランク**\nランク: **Lv.${lv}**\nチャット数: **${d.messages.toLocaleString()}**\nXP: **${d.xp.toLocaleString()} / ${chatNextXp(lv).toLocaleString()}**`});
+        }
+        const e=economyGuild(interaction.guildId),top=Object.entries(e.users).sort((a,b)=>(b[1].xp||0)-(a[1].xp||0)).slice(0,10);
+        return interaction.reply({content:`💬 **チャットランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **Lv.${chatLevel(d.xp)}** (${(d.messages||0).toLocaleString()}件)`).join('\n')||'まだデータがありません。'}`});
+      }
+
+      if (n === 'lottery') {
+        const sub=interaction.options.getSubcommand(),e=economyGuild(interaction.guildId),l=e.lottery;
+        if(sub==='settings'){
+          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return interaction.reply({content:'❌ サーバー管理権限が必要です。',ephemeral:true});
+          l.ticketPrice=interaction.options.getInteger('ticket_price',true); l.firstPrize=interaction.options.getInteger('first_prize',true); l.secondPrize=interaction.options.getInteger('second_prize',true); l.thirdPrize=interaction.options.getInteger('third_prize',true); saveStore(store);
+          return interaction.reply({content:'✅ 宝くじポイント設定を更新しました。※ポイントは現金・換金可能な景品には交換できないゲーム内ポイント専用です。',ephemeral:true});
+        }
+        if(sub==='info')return interaction.reply({content:`🎟️ **ポイント宝くじ**\n1枚: **${pointText(l.ticketPrice)}**\n🥇1等: ${pointText(l.firstPrize)}（1/1000）\n🥈2等: ${pointText(l.secondPrize)}（1/100）\n🥉3等: ${pointText(l.thirdPrize)}（1/20）\n※現金・換金可能な景品には交換できません。`});
+        const tickets=interaction.options.getInteger('tickets',true),u=economyUser(interaction.guildId,interaction.user.id),cost=l.ticketPrice*tickets;
+        if(u.points<cost)return interaction.reply({content:`❌ ポイント不足です。必要: ${pointText(cost)} / 残高: ${pointText(u.points)}`,ephemeral:true});
+        u.points-=cost; let c1=0,c2=0,c3=0,win=0;
+        for(let i=0;i<tickets;i++){const r=Math.floor(Math.random()*1000)+1;if(r===1){c1++;win+=l.firstPrize;}else if(r<=10){c2++;win+=l.secondPrize;}else if(r<=50){c3++;win+=l.thirdPrize;}}
+        u.points+=win; saveStore(store);
+        const result=`🎟️ **宝くじ結果**\n購入: ${tickets}枚 / ${pointText(cost)}\n🥇1等: ${c1}枚\n🥈2等: ${c2}枚\n🥉3等: ${c3}枚\n獲得: **${pointText(win)}**\n残高: **${pointText(u.points)}**`;
+        if(c1||c2||c3) await interaction.user.send(`🎉 **宝くじ当選通知**\n${result}`).catch(()=>{});
+        return interaction.reply({content:result});
+      }
 
       if (n === 'game') {
         // Discordの3秒制限より先にACK。以降はeditReplyを使用する。
@@ -1271,6 +1348,7 @@ client.on(Events.InteractionCreate, async interaction => {
           id:Date.now().toString(36),
           name:interaction.options.getString('name',true),
           price:interaction.options.getInteger('price',true),
+          pointPrice:interaction.options.getInteger('point_price') ?? null,
           stock:interaction.options.getInteger('stock',true),
           description:interaction.options.getString('description') || '',
           imageUrl:interaction.options.getString('image_url') || '',
@@ -1299,7 +1377,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 商品一覧を見る権限がありません。',ephemeral:true});
 
         const products=shop.products||[];
-        const lines=products.map(p=>`\`${p.id}\` ${p.active===false?'🛑':'✅'} **${p.name}** / ¥${Number(p.price).toLocaleString()} / 在庫:${p.stock<0?'∞':p.stock}${p.imageUrl?' / 🖼️画像あり':''}${p.deliveryMode?` / 配布:${p.deliveryMode}`:''}${p.roleId?` / 付与:<@&${p.roleId}>`:''}`);
+        const lines=products.map(p=>`\`${p.id}\` ${p.active===false?'🛑':'✅'} **${p.name}** / ¥${Number(p.price).toLocaleString()}${p.pointPrice?` / ${Number(p.pointPrice).toLocaleString()}pt`:''} / 在庫:${p.stock<0?'∞':p.stock}${p.imageUrl?' / 🖼️画像あり':''}${p.deliveryMode?` / 配布:${p.deliveryMode}`:''}${p.roleId?` / 付与:<@&${p.roleId}>`:''}`);
         return interaction.reply({content:lines.join('\n')||'商品はありません。',ephemeral:true});
       }
 
@@ -1314,6 +1392,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
         const name=interaction.options.getString('name');
         const price=interaction.options.getInteger('price');
+        const pointPrice=interaction.options.getInteger('point_price');
         const stock=interaction.options.getInteger('stock');
         const description=interaction.options.getString('description');
         const imageUrl=interaction.options.getString('image_url');
@@ -1326,6 +1405,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
         if(name!==null)p.name=name;
         if(price!==null)p.price=price;
+        if(pointPrice!==null)p.pointPrice=pointPrice>0?pointPrice:null;
         if(stock!==null)p.stock=stock;
         if(description!==null)p.description=description;
         if(imageUrl!==null)p.imageUrl=imageUrl;
@@ -2424,7 +2504,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if(action==='salestoggle'){shop.showSalesCount=!shop.showSalesCount;saveStore(store);return interaction.update({embeds:[shopManageEmbed(shop)],components:shopManageRows(shop)});}
       if(action==='stock'||action==='products'){
-        const ps=shop.products||[];const lines=ps.map(p=>`${p.active===false?'🛑':'✅'} **${p.name}** / ID:\`${p.id}\` / ¥${Number(p.price).toLocaleString()} / 在庫:${p.stock<0?'∞':p.stock}`);
+        const ps=shop.products||[];const lines=ps.map(p=>`${p.active===false?'🛑':'✅'} **${p.name}** / ID:\`${p.id}\` / ¥${Number(p.price).toLocaleString()}${p.pointPrice?` / ${Number(p.pointPrice).toLocaleString()}pt`:''} / 在庫:${p.stock<0?'∞':p.stock}`);
         return interaction.reply({content:lines.join('\n')||'商品はありません。',ephemeral:true});
       }
       if(action==='stats'){
@@ -2513,7 +2593,8 @@ client.on(Events.InteractionCreate, async interaction => {
         );
       if(p.imageUrl&&validHttpUrl(p.imageUrl))embed.setImage(p.imageUrl);
       const row=new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`buy:${shop.id}:${p.id}`).setLabel('この商品を購入').setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId(`buy:${shop.id}:${p.id}`).setLabel('この商品を購入').setStyle(ButtonStyle.Success),
+        ...(p.pointPrice?[new ButtonBuilder().setCustomId(`pointbuy:${shop.id}:${p.id}`).setLabel(`${p.pointPrice.toLocaleString()}ptで購入`).setStyle(ButtonStyle.Primary)]:[])
       );
       return interaction.reply({embeds:[embed],components:[row],ephemeral:true});
     }
@@ -2522,45 +2603,38 @@ client.on(Events.InteractionCreate, async interaction => {
       await interaction.deferUpdate().catch(()=>{});
       const [,gameId,posRaw]=interaction.customId.split(':'); const game=ticTacToeGames.get(gameId),pos=Number(posRaw);
       if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
-      if(game.players[0]!==interaction.user.id && (!game.bot&&game.players[1]!==interaction.user.id))return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
+      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
       if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
       if(!Number.isInteger(pos)||pos<0||pos>8||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
-      const wins=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
-      const isWin=m=>wins.some(a=>a.every(i=>game.board[i]===m));
-      game.board[pos]='X'; let winner=isWin('X')?'human':null;
-      if(!winner&&game.board.every(Boolean))game.ended=true;
-      if(!winner&&!game.ended&&game.bot){
-        const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null);
-        const findMove=mark=>empty.find(i=>{game.board[i]=mark;const w=isWin(mark);game.board[i]=null;return w;});
-        const move=findMove('O')??findMove('X')??(game.board[4]?empty[Math.floor(Math.random()*empty.length)]:4);
-        game.board[move]='O'; if(isWin('O'))winner='bot'; else if(game.board.every(Boolean))game.ended=true;
-      }else if(!winner&&!game.ended)game.turn=1-game.turn;
-      if(winner)game.ended=true;
-      const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
-      const content=winner==='human'?`🎮 **9面 三目並べ**\n🏆 <@${game.players[0]}> の勝ち！`:winner==='bot'?`🎮 **9面 三目並べ**\n🤖 BOTの勝ち！`:game.ended?'🎮 **9面 三目並べ**\n🤝 引き分けです。':`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
-      await interaction.editReply({content,components:game.render()}); if(game.ended)setTimeout(()=>ticTacToeGames.delete(gameId),60_000); return;
+      const wins=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]],isWin=m=>wins.some(a=>a.every(i=>game.board[i]===m));
+      const impossibleDraw=()=>!wins.some(line=>line.every(i=>game.board[i]!=='O'))&&!wins.some(line=>line.every(i=>game.board[i]!=='X'));
+      const mark=game.turn===0?'X':'O';game.board[pos]=mark;let winner=isWin(mark)?game.turn:null;
+      if(winner===null&&(game.board.every(Boolean)||impossibleDraw()))game.ended=true;
+      if(winner===null&&!game.ended&&game.bot){
+        const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null),findMove=m=>empty.find(i=>{game.board[i]=m;const w=isWin(m);game.board[i]=null;return w;});
+        const move=findMove('O')??findMove('X')??(!game.board[4]?4:empty[Math.floor(Math.random()*empty.length)]);game.board[move]='O';
+        if(isWin('O'))winner=1;else if(game.board.every(Boolean)||impossibleDraw())game.ended=true;
+      }else if(winner===null&&!game.ended)game.turn=1-game.turn;
+      if(winner!==null)game.ended=true;
+      const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`, winnerText=winner!==null?(winner===1&&game.bot?'🤖 BOT':`<@${game.players[winner]}>`):null;
+      const content=winnerText?`🎮 **9面 三目並べ**\n🏆 ${winnerText} の勝ち！`:game.ended?'🎮 **9面 三目並べ**\n🤝 これ以上どちらも勝てないため引き分けです。':`🎮 **9面 三目並べ**\n❌ <@${game.players[0]}> vs ⭕ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
+      await interaction.editReply({content,components:game.render()});if(game.ended)setTimeout(()=>ticTacToeGames.delete(gameId),60_000);return;
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('gomoku:')){
       await interaction.deferUpdate().catch(()=>{});
       const [,gameId,posRaw]=interaction.customId.split(':'); const game=gomokuGames.get(gameId),pos=Number(posRaw);
       if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
-      if(game.players[0]!==interaction.user.id && (!game.bot&&game.players[1]!==interaction.user.id))return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
+      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
       if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
       if(!Number.isInteger(pos)||pos<0||pos>24||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
       const lines=[];for(let r=0;r<5;r++)lines.push([0,1,2,3,4].map(c=>r*5+c));for(let c=0;c<5;c++)lines.push([0,1,2,3,4].map(r=>r*5+c));lines.push([0,6,12,18,24],[4,8,12,16,20]);
-      const isWin=m=>lines.some(a=>a.every(i=>game.board[i]===m));
-      game.board[pos]='X';let winner=isWin('X')?'human':null;
-      if(!winner&&game.board.every(Boolean))game.ended=true;
-      if(!winner&&!game.ended&&game.bot){
-        const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null);
-        const findMove=mark=>empty.find(i=>{game.board[i]=mark;const w=isWin(mark);game.board[i]=null;return w;});
-        const center=12, move=findMove('O')??findMove('X')??(!game.board[center]?center:empty[Math.floor(Math.random()*empty.length)]);
-        game.board[move]='O';if(isWin('O'))winner='bot';else if(game.board.every(Boolean))game.ended=true;
-      }else if(!winner&&!game.ended)game.turn=1-game.turn;
-      if(winner)game.ended=true;
-      const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`;
-      const content=winner==='human'?`⚫⚪ **5×5 五目並べ**\n🏆 <@${game.players[0]}> の勝ち！`:winner==='bot'?`⚫⚪ **5×5 五目並べ**\n🤖 BOTの勝ち！`:game.ended?'⚫⚪ **5×5 五目並べ**\n🤝 引き分けです。':`⚫⚪ **5×5 五目並べ**\n⚫ <@${game.players[0]}> vs ⚪ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
+      const isWin=m=>lines.some(a=>a.every(i=>game.board[i]===m)),impossibleDraw=()=>!lines.some(line=>line.every(i=>game.board[i]!=='O'))&&!lines.some(line=>line.every(i=>game.board[i]!=='X'));
+      const mark=game.turn===0?'X':'O';game.board[pos]=mark;let winner=isWin(mark)?game.turn:null;
+      if(winner===null&&(game.board.every(Boolean)||impossibleDraw()))game.ended=true;
+      if(winner===null&&!game.ended&&game.bot){const empty=game.board.map((v,i)=>v?null:i).filter(i=>i!==null),findMove=m=>empty.find(i=>{game.board[i]=m;const w=isWin(m);game.board[i]=null;return w;});const move=findMove('O')??findMove('X')??(!game.board[12]?12:empty[Math.floor(Math.random()*empty.length)]);game.board[move]='O';if(isWin('O'))winner=1;else if(game.board.every(Boolean)||impossibleDraw())game.ended=true;}else if(winner===null&&!game.ended)game.turn=1-game.turn;
+      if(winner!==null)game.ended=true;const who2=game.bot?'🤖 BOT':`<@${game.players[1]}>`,winnerText=winner!==null?(winner===1&&game.bot?'🤖 BOT':`<@${game.players[winner]}>`):null;
+      const content=winnerText?`⚫⚪ **5×5 五目並べ**\n🏆 ${winnerText} の勝ち！`:game.ended?'⚫⚪ **5×5 五目並べ**\n🤝 これ以上どちらも勝てないため引き分けです。':`⚫⚪ **5×5 五目並べ**\n⚫ <@${game.players[0]}> vs ⚪ ${who2}\n現在の手番: <@${game.players[game.turn]}>`;
       await interaction.editReply({content,components:game.render()});if(game.ended)setTimeout(()=>gomokuGames.delete(gameId),60_000);return;
     }
 
@@ -2900,6 +2974,16 @@ client.on(Events.InteractionCreate, async interaction => {
         await interaction.reply('🔒 チケットを閉じます。');
         setTimeout(()=>interaction.channel?.delete('チケット終了').catch(()=>{}),1500);
         return;
+      }
+      if(kind==='pointbuy'){
+        const shop=store.shops[a],p=shop?.products?.find(x=>x.id===b); if(!shop||!p||!p.pointPrice)return interaction.reply({content:'❌ ポイント購入できない商品です。',ephemeral:true});
+        const u=economyUser(interaction.guildId,interaction.user.id); if(u.points<p.pointPrice)return interaction.reply({content:`❌ ポイント不足です。必要 ${pointText(p.pointPrice)} / 残高 ${pointText(u.points)}`,ephemeral:true});
+        if(p.stock===0)return interaction.reply({content:'❌ 在庫切れです。',ephemeral:true});
+        u.points-=p.pointPrice;if(p.stock>0)p.stock--;saveStore(store);
+        const deliveryLink=p.deliveryMode==='zip'&&p.zipFile?.url?`📦 ZIP: ${p.zipFile.url}`:p.deliveryMode==='gigafile'&&p.gigafileUrl?`📦 ギガファイル便: ${p.gigafileUrl}`:p.deliveryMode==='url'&&p.downloadUrl?`🔗 URL: ${p.downloadUrl}`:'';
+        await interaction.user.send([`✅ ポイント購入完了: ${p.name}`,`使用: ${pointText(p.pointPrice)}`,deliveryLink,p.delivery||''].filter(Boolean).join('\n')).catch(()=>{});
+        if(p.roleId){const m=await interaction.guild.members.fetch(interaction.user.id).catch(()=>null);if(m)await m.roles.add(p.roleId).catch(()=>{});}
+        return interaction.reply({content:`✅ **${p.name}** を ${pointText(p.pointPrice)} で購入しました。残高: **${pointText(u.points)}**`,ephemeral:true});
       }
       if (kind === 'buy') {
         const shop=store.shops[a],product=shop?.products?.find(p=>p.id===b);
@@ -3297,6 +3381,17 @@ async function runWeatherWatcher(){
   }catch(e){console.error('❌ weather auto watcher',e);}
   finally{weatherWatcherBusy=false;}
 }
+
+client.on(Events.MessageCreate, async message=>{
+  try{
+    if(!message.guildId||message.author.bot||!message.content?.trim())return;
+    const e=economyGuild(message.guildId),u=economyUser(message.guildId,message.author.id);
+    u.messages=(u.messages||0)+1; u.xp=(u.xp||0)+1;
+    const key=`${message.guildId}:${message.author.id}`,now=Date.now(),last=chatPointCooldowns.get(key)||0;
+    if(e.pointsPerMessage>0 && now-last>=e.cooldownSeconds*1000){u.points=(u.points||0)+e.pointsPerMessage;chatPointCooldowns.set(key,now);}
+    saveStore(store);
+  }catch(e){console.error('chat rank/points',e);}
+});
 
 client.once(Events.ClientReady,async readyClient=>{
   console.log(`✅ Discordログイン完了: ${readyClient.user.tag} / ${readyClient.user.id}`);

@@ -49,6 +49,7 @@ export const commandData = [
     .addIntegerOption(o=>o.setName('shop_id').setDescription('自販機ID').setRequired(true))
     .addStringOption(o=>o.setName('name').setDescription('商品名').setRequired(true))
     .addIntegerOption(o=>o.setName('price').setDescription('単価').setRequired(true).setMinValue(0))
+    .addIntegerOption(o=>o.setName('point_price').setDescription('ポイント購入価格（未設定=ポイント購入不可）').setMinValue(0))
     .addIntegerOption(o=>o.setName('stock').setDescription('在庫（-1=無制限）').setRequired(true).setMinValue(-1))
     .addStringOption(o=>o.setName('description').setDescription('商品説明'))
     .addStringOption(o=>o.setName('image_url').setDescription('商品画像URL（https）'))
@@ -69,6 +70,7 @@ export const commandData = [
     .addStringOption(o=>o.setName('product_id').setDescription('商品ID').setRequired(true))
     .addStringOption(o=>o.setName('name').setDescription('新しい商品名'))
     .addIntegerOption(o=>o.setName('price').setDescription('新しい価格').setMinValue(0))
+    .addIntegerOption(o=>o.setName('point_price').setDescription('新しいポイント価格（0=ポイント購入不可）').setMinValue(0))
     .addIntegerOption(o=>o.setName('stock').setDescription('新しい在庫（-1=無制限）').setMinValue(-1))
     .addStringOption(o=>o.setName('description').setDescription('新しい商品説明'))
     .addStringOption(o=>o.setName('image_url').setDescription('新しい商品画像URL（https）'))
@@ -319,7 +321,25 @@ export const commandData = [
       .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
     .addSubcommand(sc=>sc.setName('gomoku').setDescription('5×5の五目並べ（対人/BOT対戦）')
       .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false)))
-    .addSubcommand(sc=>sc.setName('rps').setDescription('BOTとじゃんけん')),
+    .addSubcommand(sc=>sc.setName('rps').setDescription('じゃんけん（対人/BOT対戦）')
+      .addUserOption(o=>o.setName('opponent').setDescription('対戦相手（省略するとBOT対戦）').setRequired(false))),
+  new SlashCommandBuilder().setName('points').setDescription('ポイントカード・チャットポイント')
+    .addSubcommand(sc=>sc.setName('balance').setDescription('自分または指定ユーザーのポイントを確認').addUserOption(o=>o.setName('user').setDescription('確認するユーザー')))
+    .addSubcommand(sc=>sc.setName('leaderboard').setDescription('サーバーのポイントランキング'))
+    .addSubcommand(sc=>sc.setName('settings').setDescription('【管理者】チャットで貯まるポイント数を設定')
+      .addIntegerOption(o=>o.setName('per_message').setDescription('1回の加算ポイント').setRequired(true).setMinValue(0).setMaxValue(10000))
+      .addIntegerOption(o=>o.setName('cooldown_seconds').setDescription('再加算までの秒数').setMinValue(5).setMaxValue(3600))),
+  new SlashCommandBuilder().setName('chat-rank').setDescription('チャットランクを確認')
+    .addSubcommand(sc=>sc.setName('me').setDescription('自分または指定ユーザーのランクを確認').addUserOption(o=>o.setName('user').setDescription('確認するユーザー')))
+    .addSubcommand(sc=>sc.setName('leaderboard').setDescription('チャットランキングを表示')),
+  new SlashCommandBuilder().setName('lottery').setDescription('ポイントで遊べる宝くじ（現金・換金不可）')
+    .addSubcommand(sc=>sc.setName('info').setDescription('宝くじの価格・当選内容を表示'))
+    .addSubcommand(sc=>sc.setName('buy').setDescription('ポイントで宝くじを購入').addIntegerOption(o=>o.setName('tickets').setDescription('購入枚数').setRequired(true).setMinValue(1).setMaxValue(100)))
+    .addSubcommand(sc=>sc.setName('settings').setDescription('【管理者】宝くじのポイント設定')
+      .addIntegerOption(o=>o.setName('ticket_price').setDescription('1枚の価格（ポイント）').setRequired(true).setMinValue(1))
+      .addIntegerOption(o=>o.setName('first_prize').setDescription('1等付与ポイント').setRequired(true).setMinValue(0))
+      .addIntegerOption(o=>o.setName('second_prize').setDescription('2等付与ポイント').setRequired(true).setMinValue(0))
+      .addIntegerOption(o=>o.setName('third_prize').setDescription('3等付与ポイント').setRequired(true).setMinValue(0))),
   new SlashCommandBuilder().setName('timer').setDescription('タイマーを開始・確認・キャンセル')
     .addSubcommand(sc=>sc.setName('start').setDescription('3分・5分・10分のショートカットで開始')
       .addIntegerOption(o=>o.setName('minutes').setDescription('時間').setRequired(true).addChoices(
