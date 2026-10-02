@@ -1027,9 +1027,16 @@ const CONSOLIDATED_COMMAND_ALIASES = {
 };
 function legacyCommandName(interaction){
   const root=interaction.commandName;
-  let sub=null;
+  let group=null, sub=null;
+  try{group=interaction.options?.getSubcommandGroup(false)||null;}catch{}
   try{sub=interaction.options?.getSubcommand(false)||null;}catch{}
-  return (sub && CONSOLIDATED_COMMAND_ALIASES[`${root}:${sub}`]) || root;
+  // Discordはサブコマンドの中にサブコマンドを入れられないため、
+  // /weather auto add のような3階層は SubcommandGroup として扱う。
+  if(group==='auto' && root==='weather') return 'weather-auto';
+  const groupedKey=group&&sub?`${root}:${group}:${sub}`:null;
+  return (groupedKey && CONSOLIDATED_COMMAND_ALIASES[groupedKey])
+    || (sub && CONSOLIDATED_COMMAND_ALIASES[`${root}:${sub}`])
+    || root;
 }
 
 client.on(Events.InteractionCreate, async interaction => {
