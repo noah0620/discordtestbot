@@ -1,0 +1,11 @@
+Discord MultiBot v6.0.28
+
+・トップレベルSlash Commandを100件から29件へ整理
+・関連機能をサブコマンドへ統合
+・/music に play/queue/skip/stop/pause/resume/nowplaying/volume/stats を統合
+・/weather、/earthquake、/shop、/product、/role、/ticket、/news、/social、/x などを統合
+・既存の内部処理は旧コマンド名へ変換して再利用するため機能を維持
+・/help を新しいサブコマンド構成に対応
+・/music play の最優先ACK処理を維持
+
+コマンド定義変更のため、展開後に npm run deploy-commands を実行してください。

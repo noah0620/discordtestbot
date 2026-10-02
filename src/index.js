@@ -22,17 +22,17 @@ import PDFDocument from 'pdfkit';
 import { commandData } from './commands/definitions.js';
 
 const HELP_CATEGORIES = [
-  { id:'basic', label:'基本・BOT管理', emoji:'🤖', test:n=>['help','supportchannel','ping','owner-status','bot-restart','admin-role-set','admin-role-remove','admin-role-status','diagnostics'].includes(n) },
-  { id:'shop', label:'自販機・商品・注文', emoji:'🛒', test:n=>/^(shop-|product-|order-)/.test(n) },
-  { id:'verify', label:'認証・参加退出', emoji:'✅', test:n=>/^(verify-|join-leave$)/.test(n) },
-  { id:'role', label:'ロール管理', emoji:'🎭', test:n=>/^role-/.test(n) },
-  { id:'ticket', label:'チケット', emoji:'🎫', test:n=>/^ticket-/.test(n) },
-  { id:'auto', label:'自動返信・予約・モデレーション', emoji:'💬', test:n=>/^(autoreply-|schedule-|moderation-)/.test(n) },
-  { id:'guild', label:'サーバー設定', emoji:'⚙️', test:n=>/^(guild-|setting$)/.test(n) },
-  { id:'social', label:'SNS・RSS・メディア', emoji:'📡', test:n=>/^(social-|latest-|x-|rsshub-|media-)/.test(n) },
-  { id:'news', label:'ニュース', emoji:'📰', test:n=>/^news-/.test(n) },
-  { id:'weather', label:'天気・地震', emoji:'🌤️', test:n=>/^(weather|earthquake)/.test(n) },
-  { id:'music', label:'音楽・SNSダウンロード', emoji:'🎵', test:n=>['play','queue','skip','stop','pause','resume','nowplaying','volume','music-stats','download'].includes(n) },
+  { id:'basic', label:'基本・BOT管理', emoji:'🤖', test:n=>['help','system','admin-role'].includes(n) },
+  { id:'shop', label:'自販機・商品・注文', emoji:'🛒', test:n=>['shop','product'].includes(n) },
+  { id:'verify', label:'認証・参加退出', emoji:'✅', test:n=>['verify','join-leave'].includes(n) },
+  { id:'role', label:'ロール管理', emoji:'🎭', test:n=>n==='role' },
+  { id:'ticket', label:'チケット', emoji:'🎫', test:n=>n==='ticket' },
+  { id:'auto', label:'自動返信・予約・モデレーション', emoji:'💬', test:n=>['autoreply','schedule','moderation'].includes(n) },
+  { id:'guild', label:'サーバー設定', emoji:'⚙️', test:n=>n==='guild' },
+  { id:'social', label:'SNS・RSS・メディア', emoji:'📡', test:n=>['social','latest-add','x','media'].includes(n) },
+  { id:'news', label:'ニュース', emoji:'📰', test:n=>n==='news' },
+  { id:'weather', label:'天気・地震', emoji:'🌤️', test:n=>['weather','earthquake'].includes(n) },
+  { id:'music', label:'音楽・SNSダウンロード', emoji:'🎵', test:n=>['music','download'].includes(n) },
   { id:'image', label:'画像・動画ツール', emoji:'🖼️', test:n=>n==='image' },
   { id:'era', label:'西暦・和暦・年号検索', emoji:'📅', test:n=>n==='era' },
   { id:'game', label:'ゲーム', emoji:'🎮', test:n=>n==='game' },
@@ -933,12 +933,111 @@ function shogiPseudoLegal(g,m,side){const a=g.board[m.fy]?.[m.fx],d=g.board[m.ty
 function shogiMoves(g,side){const out=[];for(let fy=0;fy<9;fy++)for(let fx=0;fx<9;fx++)for(let ty=0;ty<9;ty++)for(let tx=0;tx<9;tx++){const m={fx,fy,tx,ty};if(shogiPseudoLegal(g,m,side))out.push(m);}return out;}
 function boardContent(g){const p2=g.bot?'🤖 BOT':`<@${g.players[1]}>`;if(g.type==='othello'){const b=g.board.filter(x=>x==='B').length,w=g.board.filter(x=>x==='W').length;return `⚫⚪ **オセロ**\n⚫ <@${g.players[0]}> vs ⚪ ${p2}\n${renderOthello(g)}\n手番: ${g.turn===0?`<@${g.players[0]}>`:p2} / ⚫${b} ⚪${w}`;}if(g.type==='chess')return `♟️ **チェス**\n白 <@${g.players[0]}> vs 黒 ${p2}\n${renderChess(g)}\n手番: ${g.chess.turn()==='w'?`<@${g.players[0]}>`:p2}`;return `☗ **将棋**\n先手 <@${g.players[0]}> vs 後手 ${p2}\n${renderShogi(g)}\n手番: ${g.turn===0?`<@${g.players[0]}>`:p2}`;}
 
+
+const CONSOLIDATED_COMMAND_ALIASES = {
+  'system:support':'supportchannel',
+  'system:ping':'ping',
+  'system:owner-status':'owner-status',
+  'system:restart':'bot-restart',
+  'system:diagnostics':'diagnostics',
+  'system:rsshub-status':'rsshub-status',
+  'admin-role:set':'admin-role-set',
+  'admin-role:remove':'admin-role-remove',
+  'admin-role:status':'admin-role-status',
+  'shop:create':'shop-create',
+  'shop:list':'shop-list',
+  'shop:config':'shop-config',
+  'shop:delete':'shop-delete',
+  'shop:admin':'shop-admin',
+  'shop:panel':'shop-panel',
+  'shop:orders':'order-list',
+  'product:add':'product-add',
+  'product:list':'product-list',
+  'product:edit':'product-edit',
+  'product:url-update':'product-url-update',
+  'product:remove':'product-remove',
+  'verify:panel':'verify-panel',
+  'verify:admin':'verify-admin',
+  'verify:status':'verify-status',
+  'verify:settings':'verify-settings',
+  'role:panel':'role-panel',
+  'role:add':'role-add',
+  'role:list':'role-list',
+  'role:remove':'role-remove',
+  'role:create':'role-create',
+  'role:delete':'role-delete',
+  'weather:forecast':'weather',
+  'weather:register':'weather-register',
+  'weather:admin':'weather-admin',
+  'weather:channel':'weather-channel',
+  'weather:channel-remove':'weather-channel-remove',
+  'weather:list':'weather-list',
+  'weather:auto':'weather-auto',
+  'weather:setup':'weather-setup',
+  'earthquake:latest':'earthquake',
+  'earthquake:register':'earthquake-register',
+  'earthquake:list':'earthquake-list',
+  'earthquake:auto':'earthquake-auto',
+  'earthquake:setup':'earthquake-setup',
+  'earthquake:auto-add':'earthquake-auto-add',
+  'earthquake:auto-list':'earthquake-auto-list',
+  'earthquake:auto-remove':'earthquake-auto-remove',
+  'ticket:panel':'ticket-panel',
+  'ticket:settings':'ticket-settings',
+  'ticket:log-channel':'ticket-log-channel',
+  'ticket:status':'ticket-status',
+  'autoreply:add':'autoreply-add',
+  'autoreply:remove':'autoreply-remove',
+  'autoreply:list':'autoreply-list',
+  'guild:settings':'guild-settings',
+  'guild:status':'guild-status',
+  'guild:legacy-setting':'setting',
+  'x:add':'x-add',
+  'x:list':'x-list',
+  'x:edit':'x-edit',
+  'x:remove':'x-remove',
+  'x:test':'x-test',
+  'media:add':'media-add',
+  'media:search':'media-search',
+  'media:remove':'media-remove',
+  'social:add':'social-source-add',
+  'social:remove':'social-source-remove',
+  'social:list':'social-list',
+  'social:test':'social-test',
+  'news:add':'news-source-add',
+  'news:remove':'news-source-remove',
+  'news:list':'news-list',
+  'news:auto':'news-auto',
+  'news:test':'news-test',
+  'schedule:post':'schedule-post',
+  'schedule:list':'schedule-list',
+  'schedule:cancel':'schedule-cancel',
+  'moderation:rule':'moderation-rule',
+  'moderation:list':'moderation-list',
+  'moderation:remove':'moderation-remove',
+  'music:play':'play',
+  'music:queue':'queue',
+  'music:skip':'skip',
+  'music:stop':'stop',
+  'music:pause':'pause',
+  'music:resume':'resume',
+  'music:nowplaying':'nowplaying',
+  'music:volume':'volume',
+  'music:stats':'music-stats',
+};
+function legacyCommandName(interaction){
+  const root=interaction.commandName;
+  let sub=null;
+  try{sub=interaction.options?.getSubcommand(false)||null;}catch{}
+  return (sub && CONSOLIDATED_COMMAND_ALIASES[`${root}:${sub}`]) || root;
+}
+
 client.on(Events.InteractionCreate, async interaction => {
   // Discord Interaction は約3秒で初回応答期限が切れるため、/play はこのハンドラの
   // 文字列整形・ログ出力・他コマンド判定よりも先にACKする。
   // Windows PowerShellでは大量ログ出力がイベントループを遅らせる場合があるため、
   // console.log より前に実行することが重要。
-  if (interaction.isChatInputCommand() && interaction.commandName === 'play' && !interaction.deferred && !interaction.replied) {
+  if (interaction.isChatInputCommand() && legacyCommandName(interaction) === 'play' && !interaction.deferred && !interaction.replied) {
     const age = Date.now() - interaction.createdTimestamp;
     try {
       await interaction.deferReply();
@@ -955,7 +1054,7 @@ client.on(Events.InteractionCreate, async interaction => {
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
   try {
     if (interaction.isAutocomplete()) {
-      const choices = interaction.commandName.startsWith('earthquake')
+      const choices = legacyCommandName(interaction).startsWith('earthquake')
         ? searchPrefectureChoices(interaction.options.getFocused())
         : searchRegionChoices(interaction.options.getFocused());
       return interaction.respond(choices);
@@ -1031,7 +1130,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isChatInputCommand()) {
-      let n = interaction.commandName;
+      let n = legacyCommandName(interaction);
       // 関連機能をサブコマンドへ統合（内部では既存処理を再利用）
       if(n==='join-leave'){
         const sub=interaction.options.getSubcommand();
@@ -1041,7 +1140,7 @@ client.on(Events.InteractionCreate, async interaction => {
         else if(sub==='welcome-status') n='welcome-status';
       }
 
-      if(ADMIN_COMMANDS.has(interaction.commandName) && !hasConfiguredAdminRole(interaction)){
+      if(ADMIN_COMMANDS.has(n) && !hasConfiguredAdminRole(interaction)){
         const g=guildData(store,interaction.guildId);
         return interaction.reply({
           content:(g.adminRoleIds||[]).length
@@ -2330,70 +2429,43 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (n === 'weather-auto') {
         const g=guildData(store,interaction.guildId);
+        const sub=interaction.options.getSubcommand();
+        if(sub==='add'){
+          const region=interaction.options.getString('region',true).trim();
+          const regions=expandWeatherRegion(region);
+          if(!regions.length)return interaction.reply({content:'❌ 地域名が正しくありません。',ephemeral:true});
+          const time=interaction.options.getString('time',true).trim();
+          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))return interaction.reply({content:'❌ 時刻は HH:MM で指定してください。',ephemeral:true});
+          g.weatherJobs??=[];
+          const id=Math.max(0,...g.weatherJobs.map(x=>x.id||0))+1;
+          const channelId=interaction.options.getChannel('channel',true).id;
+          g.weatherJobs.push({id,regions,channelId,time,lastSent:null}); saveStore(store);
+          return interaction.reply({content:`✅ 天気設定 #${id} を追加しました。\n地域: **${region}**\n投稿先: <#${channelId}>\n時刻: **${time} JST**`,ephemeral:true});
+        }
+        if(sub==='list'){
+          const jobs=g.weatherJobs||[];
+          return interaction.reply({content:jobs.length?`🌤️ **天気 自動投稿設定（${jobs.length}件）**\n`+jobs.map(j=>`#${j.id} ${j.regions.join('、')} → <#${j.channelId}> / ${j.time} JST`).join('\n').slice(0,1850):'登録なし',ephemeral:true});
+        }
+        if(sub==='remove'){
+          const id=interaction.options.getInteger('id',true),before=(g.weatherJobs||[]).length;
+          g.weatherJobs=(g.weatherJobs||[]).filter(j=>j.id!==id); saveStore(store);
+          return interaction.reply({content:before===g.weatherJobs.length?'❌ 設定IDが見つかりません。':`✅ 天気設定 #${id} を削除しました。`,ephemeral:true});
+        }
         const enabled=interaction.options.getBoolean('enabled',true);
         const raw=interaction.options.getString('time');
         const channel=interaction.options.getChannel('channel');
-
         if(raw){
           const value=raw.trim();
-          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)){
-            return interaction.reply({content:'❌ 時刻は `07:00` や `18:30` のように24時間表記で入力してください。',ephemeral:true});
-          }
-          g.weatherAutoTime=value;
-          g.lastWeatherPostDate=null;
+          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))return interaction.reply({content:'❌ 時刻は `07:00` や `18:30` のように24時間表記で入力してください。',ephemeral:true});
+          g.weatherAutoTime=value; g.lastWeatherPostDate=null;
         }
-
         if(channel)g.weatherChannelId=channel.id;
-
         const registeredForAuto=g.weatherRegions||[];
         const missingRoute=registeredForAuto.filter(pref=>!(g.weatherChannelRoutes||{})[pref] && !g.weatherChannelId);
-        if(enabled && missingRoute.length){
-          return interaction.reply({
-            content:`❌ 投稿先が未設定の地域があります: ${missingRoute.join('、')}\n`
-              + '`/weather-channel` で地域ごとの投稿先を設定するか、`/weather-auto channel:` で共通投稿先を設定してください。',
-            ephemeral:true
-          });
-        }
-
-        if(enabled && !(g.weatherRegions||[]).length){
-          return interaction.reply({
-            content:'❌ 自動投稿をONにする前に天気地域を1つ以上登録してください。\n例: `/weather-register action:追加 region:関東地方`',
-            ephemeral:true
-          });
-        }
-
-        g.weatherAutoEnabled=enabled;
-        saveStore(store);
-        return interaction.reply({
-          content:`✅ **自動天気設定を保存しました**\n`
-            + `自動投稿: **${g.weatherAutoEnabled?'ON':'OFF'}**\n`
-            + `投稿時刻: **${g.weatherAutoTime||'07:00'}**（日本時間）\n`
-            + `共通投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定（地域別設定を使用可能）'}\n`
-            + `登録地域: **${(g.weatherRegions||[]).length}/47都道府県**`,
-          ephemeral:true
-        });
-      }
-
-      if (n === 'earthquake-auto-add') {
-        const g=guildData(store,interaction.guildId);
-        const region=interaction.options.getString('region',true).trim();
-        const regions=region==='全国'?[]:expandWeatherRegion(region);
-        if(region!=='全国'&&!regions.length)return interaction.reply({content:'❌ 地域名が正しくありません。',ephemeral:true});
-        const channelId=interaction.options.getChannel('channel',true).id;
-        const minIntensity=interaction.options.getInteger('min_intensity')||3;
-        g.earthquakeJobs??=[];
-        const id=Math.max(0,...g.earthquakeJobs.map(x=>x.id||0))+1;
-        g.earthquakeJobs.push({id,region,regions,channelId,minIntensity});saveStore(store);
-        return interaction.reply({content:`✅ 地震速報設定 #${id} を追加: ${region} / <#${channelId}> / 最低震度 ${minIntensity}`,ephemeral:true});
-      }
-      if(n==='earthquake-auto-list'){
-        const jobs=guildData(store,interaction.guildId).earthquakeJobs||[];
-        return interaction.reply({content:jobs.length?jobs.map(j=>`#${j.id} ${j.region||((j.regions||[]).join('、')||'全国')} → <#${j.channelId}> / 最低震度 ${j.minIntensity||3}`).join('\n').slice(0,1900):'登録なし',ephemeral:true});
-      }
-      if(n==='earthquake-auto-remove'){
-        const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true);
-        const before=(g.earthquakeJobs||[]).length;g.earthquakeJobs=(g.earthquakeJobs||[]).filter(j=>j.id!==id);saveStore(store);
-        return interaction.reply({content:before===g.earthquakeJobs.length?'❌ 設定IDが見つかりません。':`✅ 地震速報設定 #${id} を削除しました。`,ephemeral:true});
+        if(enabled && missingRoute.length)return interaction.reply({content:`❌ 投稿先が未設定の地域があります: ${missingRoute.join('、')}`,ephemeral:true});
+        if(enabled && !registeredForAuto.length)return interaction.reply({content:'❌ 自動投稿をONにする前に天気地域を1つ以上登録してください。',ephemeral:true});
+        g.weatherAutoEnabled=enabled; saveStore(store);
+        return interaction.reply({content:`✅ 共通天気自動投稿: **${enabled?'ON':'OFF'}**\n時刻: **${g.weatherAutoTime||'07:00'} JST**\n投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定'}`,ephemeral:true});
       }
 
       if (n === 'earthquake') {
