@@ -119,7 +119,76 @@ async function sendHelp(interaction){
   if(interaction.replied){
     return interaction.followUp(payload);
   }
-  return interaction.reply(payload);
+  return safeReply(interaction, payload);
+}
+
+
+// v6.0.30: Discord Interaction の 10062 / 40060 を一元的に防止する。
+// return safeReply(interaction, )/update() の Promise rejection が EventEmitter 外へ漏れる問題もここで吸収する。
+async function safeDeferReply(interaction, options={}){
+  if(!interaction?.isRepliable?.()) return false;
+  if(interaction.deferred || interaction.replied) return true;
+  try{
+    await interaction.deferReply(options);
+    return true;
+  }catch(e){
+    if(e?.code===10062 || e?.code===40060){
+      console.warn(`⚠️ Interaction ACKをスキップ: ${interaction.id} / code=${e.code}`);
+      return false;
+    }
+    throw e;
+  }
+}
+
+async function safeReply(interaction, payload){
+  if(!interaction?.isRepliable?.()) return null;
+  try{
+    if(interaction.deferred){
+      const p=(payload && typeof payload==='object' && !Array.isArray(payload)) ? {...payload} : payload;
+      if(p && typeof p==='object') delete p.ephemeral;
+      return await interaction.editReply(p);
+    }
+    if(interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  }catch(e){
+    if(e?.code===40060){
+      try{
+        if(interaction.deferred) return await interaction.editReply(payload);
+        return await interaction.followUp(payload);
+      }catch{}
+      console.warn(`⚠️ Interaction二重ACKを抑止: ${interaction.id}`);
+      return null;
+    }
+    if(e?.code===10062){
+      console.warn(`⚠️ Interaction期限切れを抑止: ${interaction.id}`);
+      return null;
+    }
+    throw e;
+  }
+}
+
+async function safeUpdate(interaction, payload){
+  try{
+    if(interaction.deferred || interaction.replied){
+      try{return await interaction.editReply(payload);}catch{}
+      if(interaction.message?.edit) return await interaction.message.edit(payload);
+      return null;
+    }
+    return await interaction.update(payload);
+  }catch(e){
+    if(e?.code===40060){
+      try{return await interaction.editReply(payload);}catch{}
+      try{return await interaction.message?.edit?.(payload);}catch{}
+      console.warn(`⚠️ Button二重ACKを抑止: ${interaction.id}`);
+      return null;
+    }
+    if(e?.code===10062){
+      console.warn(`⚠️ Button期限切れを抑止: ${interaction.id}`);
+      try{return await interaction.message?.edit?.(payload);}catch{}
+      return null;
+    }
+    throw e;
+  }
 }
 
 assertConfig();
@@ -367,7 +436,7 @@ async function removeImageBackground(buffer,outPath){
   await fs.writeFile(outPath,Buffer.from(await result.arrayBuffer()));
 }
 async function sendImageResult(interaction,work,label){
-  await interaction.deferReply({ephemeral:true});let dir=null;
+  await safeDeferReply(interaction, {ephemeral:true});let dir=null;
   try{
     dir=await makeTempImageDir();const result=await work(dir);const st=await fs.stat(result.path);
     const maxBytes=Number(result.maxUploadMb||process.env.DISCORD_UPLOAD_MAX_MB||20)*1024*1024;
@@ -1047,7 +1116,8 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isChatInputCommand() && legacyCommandName(interaction) === 'play' && !interaction.deferred && !interaction.replied) {
     const age = Date.now() - interaction.createdTimestamp;
     try {
-      await interaction.deferReply();
+      const acked = await safeDeferReply(interaction);
+      if(!acked) return;
       console.log(`⚡ /play 最優先ACK完了: ${interaction.id} / 受信時 ${age}ms`);
     } catch (e) {
       if (e?.code === 10062) {
@@ -1056,6 +1126,17 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       throw e;
     }
+  }
+
+  // 通常コマンドは処理が1.5秒を超えた場合だけ自動defer。
+  // 軽いコマンドは従来どおり reply、重いコマンドだけ3秒制限から保護する。
+  if(interaction.isChatInputCommand() && !interaction.deferred && !interaction.replied){
+    const ackTimer=setTimeout(async()=>{
+      if(!interaction.deferred && !interaction.replied){
+        await safeDeferReply(interaction).catch(e=>console.error('❌ 自動ACK:',e));
+      }
+    },1500);
+    ackTimer.unref?.();
   }
 
   console.log(`📨 Interaction受信: type=${interaction.type} command=${interaction.commandName || '-'} user=${interaction.user?.tag || interaction.user?.id || '-'}`);
@@ -1083,14 +1164,14 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if(interaction.isButton()&&interaction.customId.startsWith('boardmove:')){
-      const id=interaction.customId.split(':')[1],g=boardGames.get(id);if(!g)return interaction.reply({content:'❌ この対局は終了しています。',ephemeral:true});
-      const expected=g.type==='chess'?(g.chess.turn()==='w'?g.players[0]:g.players[1]):g.players[g.turn];if(interaction.user.id!==expected)return interaction.reply({content:'❌ あなたの手番ではありません。',ephemeral:true});
+      const id=interaction.customId.split(':')[1],g=boardGames.get(id);if(!g)return safeReply(interaction, {content:'❌ この対局は終了しています。',ephemeral:true});
+      const expected=g.type==='chess'?(g.chess.turn()==='w'?g.players[0]:g.players[1]):g.players[g.turn];if(interaction.user.id!==expected)return safeReply(interaction, {content:'❌ あなたの手番ではありません。',ephemeral:true});
       const modal=new ModalBuilder().setCustomId(`boardmodal:${id}`).setTitle(g.type==='othello'?'オセロの手':g.type==='chess'?'チェスの手':'将棋の手');
       const hint=g.type==='othello'?'例: d3':g.type==='chess'?'例: e2e4 / e7e8q':'例: 7g7f';
       modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('move').setLabel(hint).setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(8)));return interaction.showModal(modal);
     }
     if(interaction.isModalSubmit()&&interaction.customId.startsWith('boardmodal:')){
-      const id=interaction.customId.split(':')[1],g=boardGames.get(id);await interaction.deferReply({ephemeral:true});if(!g)return interaction.editReply('❌ この対局は終了しています。');
+      const id=interaction.customId.split(':')[1],g=boardGames.get(id);await safeDeferReply(interaction, {ephemeral:true});if(!g)return interaction.editReply('❌ この対局は終了しています。');
       const raw=interaction.fields.getTextInputValue('move').trim().toLowerCase();let result='';
       if(g.type==='othello'){
         const m=raw.match(/^([a-h])([1-8])$/),side=g.turn===0?'B':'W';if(!m)return interaction.editReply('❌ `d3` の形式で入力してください。');const i=(+m[2]-1)*8+'abcdefgh'.indexOf(m[1]),mv=othelloLegal(g.board,side).find(x=>x.i===i);if(!mv)return interaction.editReply('❌ そこには置けません。');g.board[i]=side;mv.flips.forEach(x=>g.board[x]=side);g.turn=1-g.turn;
@@ -1149,7 +1230,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if(ADMIN_COMMANDS.has(n) && !hasConfiguredAdminRole(interaction)){
         const g=guildData(store,interaction.guildId);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:(g.adminRoleIds||[]).length
             ? `❌ 設定済み管理者ロール（${g.adminRoleIds.map(id=>`<@&${id}>`).join(' / ')}）のいずれかが必要です。`
             : '❌ 管理者ロールが未設定です。サーバー所有者が `/admin-role-set` で最初の管理者ロールを設定してください。',
@@ -1161,49 +1242,49 @@ client.on(Events.InteractionCreate, async interaction => {
       if (n === 'points') {
         const sub=interaction.options.getSubcommand();
         if(sub==='settings'){
-          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return interaction.reply({content:'❌ サーバー管理権限が必要です。',ephemeral:true});
+          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return safeReply(interaction, {content:'❌ サーバー管理権限が必要です。',ephemeral:true});
           const e=economyGuild(interaction.guildId); e.pointsPerMessage=interaction.options.getInteger('per_message',true); e.cooldownSeconds=interaction.options.getInteger('cooldown_seconds')??60; saveStore(store);
-          return interaction.reply({content:`✅ チャットポイントを **1回 ${e.pointsPerMessage}pt** / **${e.cooldownSeconds}秒ごと** に設定しました。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ チャットポイントを **1回 ${e.pointsPerMessage}pt** / **${e.cooldownSeconds}秒ごと** に設定しました。`,ephemeral:true});
         }
         if(sub==='balance'){
           const u=interaction.options.getUser('user')||interaction.user, d=economyUser(interaction.guildId,u.id);
-          return interaction.reply({content:`💳 **${u.username} のポイントカード**\n残高: **${pointText(d.points)}**\nチャット数: **${d.messages.toLocaleString()}**`,ephemeral:true});
+          return safeReply(interaction, {content:`💳 **${u.username} のポイントカード**\n残高: **${pointText(d.points)}**\nチャット数: **${d.messages.toLocaleString()}**`,ephemeral:true});
         }
         const e=economyGuild(interaction.guildId), top=Object.entries(e.users).sort((a,b)=>(b[1].points||0)-(a[1].points||0)).slice(0,10);
-        return interaction.reply({content:`💳 **ポイントランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **${pointText(d.points)}**`).join('\n')||'まだデータがありません。'}`});
+        return safeReply(interaction, {content:`💳 **ポイントランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **${pointText(d.points)}**`).join('\n')||'まだデータがありません。'}`});
       }
 
       if (n === 'chat-rank') {
         const sub=interaction.options.getSubcommand();
         if(sub==='me'){
           const u=interaction.options.getUser('user')||interaction.user,d=economyUser(interaction.guildId,u.id),lv=chatLevel(d.xp);
-          return interaction.reply({content:`💬 **${u.username} のチャットランク**\nランク: **Lv.${lv}**\nチャット数: **${d.messages.toLocaleString()}**\nXP: **${d.xp.toLocaleString()} / ${chatNextXp(lv).toLocaleString()}**`});
+          return safeReply(interaction, {content:`💬 **${u.username} のチャットランク**\nランク: **Lv.${lv}**\nチャット数: **${d.messages.toLocaleString()}**\nXP: **${d.xp.toLocaleString()} / ${chatNextXp(lv).toLocaleString()}**`});
         }
         const e=economyGuild(interaction.guildId),top=Object.entries(e.users).sort((a,b)=>(b[1].xp||0)-(a[1].xp||0)).slice(0,10);
-        return interaction.reply({content:`💬 **チャットランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **Lv.${chatLevel(d.xp)}** (${(d.messages||0).toLocaleString()}件)`).join('\n')||'まだデータがありません。'}`});
+        return safeReply(interaction, {content:`💬 **チャットランキング**\n${top.map(([id,d],i)=>`${i+1}. <@${id}> — **Lv.${chatLevel(d.xp)}** (${(d.messages||0).toLocaleString()}件)`).join('\n')||'まだデータがありません。'}`});
       }
 
       if (n === 'lottery') {
         const sub=interaction.options.getSubcommand(),e=economyGuild(interaction.guildId),l=e.lottery;
         if(sub==='settings'){
-          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return interaction.reply({content:'❌ サーバー管理権限が必要です。',ephemeral:true});
+          if(!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user))return safeReply(interaction, {content:'❌ サーバー管理権限が必要です。',ephemeral:true});
           l.ticketPrice=interaction.options.getInteger('ticket_price',true); l.firstPrize=interaction.options.getInteger('first_prize',true); l.secondPrize=interaction.options.getInteger('second_prize',true); l.thirdPrize=interaction.options.getInteger('third_prize',true); saveStore(store);
-          return interaction.reply({content:'✅ 宝くじポイント設定を更新しました。※ポイントは現金・換金可能な景品には交換できないゲーム内ポイント専用です。',ephemeral:true});
+          return safeReply(interaction, {content:'✅ 宝くじポイント設定を更新しました。※ポイントは現金・換金可能な景品には交換できないゲーム内ポイント専用です。',ephemeral:true});
         }
-        if(sub==='info')return interaction.reply({content:`🎟️ **ポイント宝くじ**\n1枚: **${pointText(l.ticketPrice)}**\n🥇1等: ${pointText(l.firstPrize)}（1/1000）\n🥈2等: ${pointText(l.secondPrize)}（1/100）\n🥉3等: ${pointText(l.thirdPrize)}（1/20）\n※現金・換金可能な景品には交換できません。`});
+        if(sub==='info')return safeReply(interaction, {content:`🎟️ **ポイント宝くじ**\n1枚: **${pointText(l.ticketPrice)}**\n🥇1等: ${pointText(l.firstPrize)}（1/1000）\n🥈2等: ${pointText(l.secondPrize)}（1/100）\n🥉3等: ${pointText(l.thirdPrize)}（1/20）\n※現金・換金可能な景品には交換できません。`});
         const tickets=interaction.options.getInteger('tickets',true),u=economyUser(interaction.guildId,interaction.user.id),cost=l.ticketPrice*tickets;
-        if(u.points<cost)return interaction.reply({content:`❌ ポイント不足です。必要: ${pointText(cost)} / 残高: ${pointText(u.points)}`,ephemeral:true});
+        if(u.points<cost)return safeReply(interaction, {content:`❌ ポイント不足です。必要: ${pointText(cost)} / 残高: ${pointText(u.points)}`,ephemeral:true});
         u.points-=cost; let c1=0,c2=0,c3=0,win=0;
         for(let i=0;i<tickets;i++){const r=Math.floor(Math.random()*1000)+1;if(r===1){c1++;win+=l.firstPrize;}else if(r<=10){c2++;win+=l.secondPrize;}else if(r<=50){c3++;win+=l.thirdPrize;}}
         u.points+=win; saveStore(store);
         const result=`🎟️ **宝くじ結果**\n購入: ${tickets}枚 / ${pointText(cost)}\n🥇1等: ${c1}枚\n🥈2等: ${c2}枚\n🥉3等: ${c3}枚\n獲得: **${pointText(win)}**\n残高: **${pointText(u.points)}**`;
         if(c1||c2||c3) await interaction.user.send(`🎉 **宝くじ当選通知**\n${result}`).catch(()=>{});
-        return interaction.reply({content:result});
+        return safeReply(interaction, {content:result});
       }
 
       if (n === 'game') {
         // Discordの3秒制限より先にACK。以降はeditReplyを使用する。
-        await interaction.deferReply();
+        await safeDeferReply(interaction, );
         const sub=interaction.options.getSubcommand();
         const opponent=interaction.options.getUser('opponent',false);
         if((sub==='tictactoe'||sub==='gomoku') && opponent?.id===interaction.user.id)return interaction.editReply('❌ 自分自身とは対戦できません。');
@@ -1247,7 +1328,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (n === 'timer') {
         // 最初にACKしてUnknown interaction(10062)を防止。
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         const sub=interaction.options.getSubcommand();
         const key=`${interaction.guildId||'dm'}:${interaction.user.id}`;
         if(sub==='status'){
@@ -1312,29 +1393,29 @@ client.on(Events.InteractionCreate, async interaction => {
         if(/^\d{4}$/.test(q)) { const y=Number(q); out=fmtEra(y)?`西暦 **${y}年** → **${fmtEra(y)}**\n※改元年は日付によって前の元号になる場合があります。`:`西暦 **${y}年**（明治以降の対応元号なし）`; }
         else if(/^\d{4}-\d{1,2}-\d{1,2}$/.test(q)){ const d=new Date(q+'T00:00:00+09:00'); const iso=q.split('-').map((v,i)=>i?String(Number(v)).padStart(2,'0'):v).join('-'); const e=eras.find(x=>iso>=x.start && (!x.end||iso<=x.end)); out=e?`**${q}** → **${e.name}${d.getFullYear()-e.y+1===1?'元':d.getFullYear()-e.y+1}年${d.getMonth()+1}月${d.getDate()}日**`:'対応範囲は明治以降です。'; }
         else { const m=q.match(/^(令和|平成|昭和|大正|明治)(元|\d+)年?$/); const named=eras.find(x=>x.name===q.replace(/年$/,'')); if(named){ out=`**${named.name}**\n開始: ${named.start}\n終了: ${named.end||'現在'}`; } else if(m){ const e=eras.find(x=>x.name===m[1]); const n=m[2]==='元'?1:Number(m[2]); const y=e.y+n-1; const last=e.end?Number(e.end.slice(0,4))-e.y+1:Infinity; out=n<1||n>last?'❌ その元号年は存在しません。':`**${m[1]}${m[2]}年** → 西暦 **${y}年**${n===1?`\n開始日: ${e.start}`:''}${e.end&&n===last?`\n終了日: ${e.end}`:''}`; } else out='❌ 検索形式を確認してください。例: `2026` / `令和8年` / `昭和` / `1989-01-08`'; }
-        return interaction.reply({content:`📅 **西暦・和暦・年号検索**\n${out}`,ephemeral:true});
+        return safeReply(interaction, {content:`📅 **西暦・和暦・年号検索**\n${out}`,ephemeral:true});
       }
 
       if (n === 'ping') {
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ BOTは正常にコマンドを受信しています。\nBOT: ${client.user.tag}\nBOT ID: ${client.user.id}\nGuild: ${interaction.guild?.name || 'DM'}\n時刻: ${new Date().toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})}`,
           ephemeral:true
         });
       }
 
-      if (n === 'supportchannel') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
+      if (n === 'supportchannel') return safeReply(interaction, {content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
       if (n === 'help') {
         return sendHelp(interaction);
       }
 
       if (n === 'owner-status') {
-        return interaction.reply({ content:isBotOwnerUser(interaction.user) ? `✅ BOTオーナーです。\nあなたのID: ${interaction.user.id}\nBOT_OWNER_IDS: 読み込み済み (${config.ownerIds.length}件)` : `ℹ️ BOTオーナーではありません。\nあなたのID: ${interaction.user.id}\nBOT_OWNER_IDS: ${config.ownerIds.length ? `読み込み済み (${config.ownerIds.length}件)` : '❌ 未読込（BOT本体直下の .env を確認）'}`, ephemeral:true });
+        return safeReply(interaction, { content:isBotOwnerUser(interaction.user) ? `✅ BOTオーナーです。\nあなたのID: ${interaction.user.id}\nBOT_OWNER_IDS: 読み込み済み (${config.ownerIds.length}件)` : `ℹ️ BOTオーナーではありません。\nあなたのID: ${interaction.user.id}\nBOT_OWNER_IDS: ${config.ownerIds.length ? `読み込み済み (${config.ownerIds.length}件)` : '❌ 未読込（BOT本体直下の .env を確認）'}`, ephemeral:true });
       }
       if (n === 'bot-restart') {
         if (!isBotOwnerUser(interaction.user)) {
-          return interaction.reply({content:'❌ BOT再起動はBOTオーナーのみ実行できます。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ BOT再起動はBOTオーナーのみ実行できます。',ephemeral:true});
         }
-        await interaction.reply({content:`🔄 BOTを再起動します。\n実行者: ${interaction.user.username} (${interaction.user.id})`,ephemeral:true});
+        await safeReply(interaction, {content:`🔄 BOTを再起動します。\n実行者: ${interaction.user.username} (${interaction.user.id})`,ephemeral:true});
         console.log(`🔄 BOT再起動要求: ${interaction.user.username} (${interaction.user.id})`);
         setTimeout(() => {
           try {
@@ -1357,41 +1438,41 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId);
         // 最初の1件はサーバー所有者/BOTオーナーのみ。以後は登録済み管理者も追加可能。
         if((g.adminRoleIds||[]).length===0 && !isGuildOwner(interaction) && !isBotOwnerUser(interaction.user)){
-          return interaction.reply({content:'❌ 最初の管理者ロール設定はサーバー所有者またはBOTオーナーのみ実行できます。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 最初の管理者ロール設定はサーバー所有者またはBOTオーナーのみ実行できます。',ephemeral:true});
         }
         if((g.adminRoleIds||[]).length>0 && !hasConfiguredAdminRole(interaction)){
-          return interaction.reply({content:'❌ 管理者ロールの追加には、設定済み管理者ロールが必要です。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 管理者ロールの追加には、設定済み管理者ロールが必要です。',ephemeral:true});
         }
         const role=interaction.options.getRole('role',true);
-        if(role.id===interaction.guild.id)return interaction.reply({content:'❌ @everyone は管理者ロールに設定できません。',ephemeral:true});
+        if(role.id===interaction.guild.id)return safeReply(interaction, {content:'❌ @everyone は管理者ロールに設定できません。',ephemeral:true});
         g.adminRoleIds ??= [];
         if(!g.adminRoleIds.includes(role.id))g.adminRoleIds.push(role.id);
         g.adminRoleId=g.adminRoleIds[0]||null; // 旧データ互換
         saveStore(store);
-        return interaction.reply({content:`✅ ${role} を管理者ロールに追加しました。
+        return safeReply(interaction, {content:`✅ ${role} を管理者ロールに追加しました。
 現在: ${g.adminRoleIds.map(id=>`<@&${id}>`).join(' / ')}`,ephemeral:true});
       }
 
       if (n === 'admin-role-remove') {
         const g=guildData(store,interaction.guildId);
-        if(!hasConfiguredAdminRole(interaction))return interaction.reply({content:'❌ 管理者ロールの解除には管理者権限が必要です。',ephemeral:true});
+        if(!hasConfiguredAdminRole(interaction))return safeReply(interaction, {content:'❌ 管理者ロールの解除には管理者権限が必要です。',ephemeral:true});
         const role=interaction.options.getRole('role',true);
         g.adminRoleIds=(g.adminRoleIds||[]).filter(id=>id!==role.id);
         g.adminRoleId=g.adminRoleIds[0]||null;
         saveStore(store);
-        return interaction.reply({content:`✅ ${role} を管理者ロールから解除しました。
+        return safeReply(interaction, {content:`✅ ${role} を管理者ロールから解除しました。
 現在: ${g.adminRoleIds.length?g.adminRoleIds.map(id=>`<@&${id}>`).join(' / '):'未設定'}`,ephemeral:true});
       }
 
       if (n === 'admin-role-status') {
         const g=guildData(store,interaction.guildId);
         if(!hasConfiguredAdminRole(interaction)){
-          return interaction.reply({
+          return safeReply(interaction, {
             content:'❌ この管理情報を確認できるのは、サーバー所有者または指定された管理者ロールのメンバーだけです。',
             ephemeral:true
           });
         }
-        return interaction.reply({
+        return safeReply(interaction, {
           content:(g.adminRoleIds||[]).length
             ? `🔐 **管理者設定**\nサーバー所有者: <@${interaction.guild.ownerId}>\n管理者ロール (${g.adminRoleIds.length}件): ${g.adminRoleIds.map(id=>`<@&${id}>`).join(' / ')}\nあなたの利用権限: ✅ あり`
             : `⚠️ 管理者ロールは未設定です。\nサーバー所有者 <@${interaction.guild.ownerId}> が \`/admin-role-set\` で設定してください。`,
@@ -1417,7 +1498,7 @@ client.on(Events.InteractionCreate, async interaction => {
           ['チケットカテゴリ', g.ticketCategoryId?`<#${g.ticketCategoryId}>`:'未設定'],
           ['サポートロール', g.ticketSupportRoleId?`<@&${g.ticketSupportRoleId}>`:'未設定']
         ];
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔧 **BOT診断**\n${checks.map(([k,v])=>`**${k}**: ${v}`).join('\n')}`,
           ephemeral:true
         });
@@ -1440,7 +1521,7 @@ client.on(Events.InteractionCreate, async interaction => {
         };
         store.shops[id]=shop;
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ 自動販売機 #${id}「${shop.name}」を作成しました。\nオーナー: <@${shop.ownerId}>\n注文通知: <#${shop.orderChannelId}>\n購入履歴: <#${shop.historyChannelId}>`,
           ephemeral:true
         });
@@ -1449,7 +1530,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (n === 'shop-list') {
         const shops = Object.values(store.shops)
           .filter(s=>s.guildId===interaction.guildId && s.active!==false);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:shops.length
             ? shops.map(s=>`#${s.id} **${s.name}** / owner:<@${s.ownerId}>${s.managerRoleId?` / 管理:<@&${s.managerRoleId}>`:''}`).join('\n')
             : '自動販売機はまだありません。',
@@ -1459,15 +1540,15 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (n === 'shop-config') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
 
         const name=interaction.options.getString('name');
         const role=interaction.options.getRole('manager_role');
         const ch=interaction.options.getChannel('order_channel');
         const salesCh=interaction.options.getChannel('sales_channel');
         const historyCh=interaction.options.getChannel('history_channel');
-        if(!name&&!role&&!ch&&!salesCh&&!historyCh)return interaction.reply({content:'❌ 変更する項目を1つ以上指定してください。',ephemeral:true});
+        if(!name&&!role&&!ch&&!salesCh&&!historyCh)return safeReply(interaction, {content:'❌ 変更する項目を1つ以上指定してください。',ephemeral:true});
 
         if(name)shop.name=name.trim();
         if(role)shop.managerRoleId=role.id;
@@ -1475,27 +1556,27 @@ client.on(Events.InteractionCreate, async interaction => {
         if(salesCh)shop.salesChannelId=salesCh.id;
         if(historyCh)shop.historyChannelId=historyCh.id;
         saveStore(store);
-        return interaction.reply({content:`✅ 自販機設定を更新しました。\n購入履歴固定先: ${shop.historyChannelId?`<#${shop.historyChannelId}>`:'未設定'}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 自販機設定を更新しました。\n購入履歴固定先: ${shop.historyChannelId?`<#${shop.historyChannelId}>`:'未設定'}`,ephemeral:true});
       }
 
       if (n === 'shop-delete') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
 
         const allowed = isBotOwnerUser(interaction.user)
           || shop.ownerId===interaction.user.id
           || hasConfiguredAdminRole(interaction)
           || interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 
-        if(!allowed)return interaction.reply({content:'❌ 自販機停止はオーナー・サーバー管理者・BOTオーナーのみ可能です。',ephemeral:true});
+        if(!allowed)return safeReply(interaction, {content:'❌ 自販機停止はオーナー・サーバー管理者・BOTオーナーのみ可能です。',ephemeral:true});
         shop.active=false;
         saveStore(store);
-        return interaction.reply({content:`🛑 自販機 #${shop.id}「${shop.name}」を停止しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`🛑 自販機 #${shop.id}「${shop.name}」を停止しました。`,ephemeral:true});
       }
 
       if (n === 'shop-admin') {
         if(!hasConfiguredAdminRole(interaction) && !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) && !isBotOwnerUser(interaction.user)){
-          return interaction.reply({content:'❌ 管理者のみ使用できます。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 管理者のみ使用できます。',ephemeral:true});
         }
         const shops=Object.values(store.shops).filter(s=>s.guildId===interaction.guildId && s.active!==false);
         const embed=new EmbedBuilder().setTitle('自販機管理').setDescription(`**自販機一覧**\n販売メンバー用\n\n現在: **${shops.length}台**`);
@@ -1505,24 +1586,24 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId('shopui:settings').setLabel('自販機設定').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('shopui:displayselect').setLabel('自販機表示').setStyle(ButtonStyle.Success)
         );
-        return interaction.reply({embeds:[embed],components:[row],ephemeral:true});
+        return safeReply(interaction, {embeds:[embed],components:[row],ephemeral:true});
       }
 
       if (n === 'product-add') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId||shop.active===false)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId||shop.active===false)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
 
         const addedZip=interaction.options.getAttachment('zip_file');
         const addedDownloadUrl=interaction.options.getString('download_url');
         const addedGiga=interaction.options.getString('gigafile_url');
         const requestedMode=interaction.options.getString('delivery_mode');
         if(addedZip && !addedZip.name?.toLowerCase().endsWith('.zip')){
-          return interaction.reply({content:'❌ 販売ファイルは .zip を添付してください。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 販売ファイルは .zip を添付してください。',ephemeral:true});
         }
-        if(requestedMode==='zip' && !addedZip)return interaction.reply({content:'❌ ZIP販売を選択した場合は `zip_file` を添付してください。',ephemeral:true});
-        if(requestedMode==='gigafile' && !addedGiga)return interaction.reply({content:'❌ ギガファイル便販売を選択した場合は `gigafile_url` を設定してください。',ephemeral:true});
-        if(requestedMode==='url' && !addedDownloadUrl)return interaction.reply({content:'❌ URL販売を選択した場合は `download_url` を設定してください。',ephemeral:true});
+        if(requestedMode==='zip' && !addedZip)return safeReply(interaction, {content:'❌ ZIP販売を選択した場合は `zip_file` を添付してください。',ephemeral:true});
+        if(requestedMode==='gigafile' && !addedGiga)return safeReply(interaction, {content:'❌ ギガファイル便販売を選択した場合は `gigafile_url` を設定してください。',ephemeral:true});
+        if(requestedMode==='url' && !addedDownloadUrl)return safeReply(interaction, {content:'❌ URL販売を選択した場合は `download_url` を設定してください。',ephemeral:true});
 
         const p={
           id:Date.now().toString(36),
@@ -1548,27 +1629,27 @@ client.on(Events.InteractionCreate, async interaction => {
         shop.products ??= [];
         shop.products.push(p);
         saveStore(store);
-        return interaction.reply({content:`✅ ${p.name} を追加しました。商品ID: \`${p.id}\``,ephemeral:true});
+        return safeReply(interaction, {content:`✅ ${p.name} を追加しました。商品ID: \`${p.id}\``,ephemeral:true});
       }
 
       if (n === 'product-list') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 商品一覧を見る権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 商品一覧を見る権限がありません。',ephemeral:true});
 
         const products=shop.products||[];
         const lines=products.map(p=>`\`${p.id}\` ${p.active===false?'🛑':'✅'} **${p.name}** / ¥${Number(p.price).toLocaleString()}${p.pointPrice?` / ${Number(p.pointPrice).toLocaleString()}pt`:''} / 在庫:${p.stock<0?'∞':p.stock}${p.imageUrl?' / 🖼️画像あり':''}${p.deliveryMode?` / 配布:${p.deliveryMode}`:''}${p.roleId?` / 付与:<@&${p.roleId}>`:''}`);
-        return interaction.reply({content:lines.join('\n')||'商品はありません。',ephemeral:true});
+        return safeReply(interaction, {content:lines.join('\n')||'商品はありません。',ephemeral:true});
       }
 
       if (n === 'product-edit') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
 
         const productId=interaction.options.getString('product_id',true);
         const p=(shop.products||[]).find(x=>x.id===productId);
-        if(!p)return interaction.reply({content:'❌ 商品IDが見つかりません。',ephemeral:true});
+        if(!p)return safeReply(interaction, {content:'❌ 商品IDが見つかりません。',ephemeral:true});
 
         const name=interaction.options.getString('name');
         const price=interaction.options.getInteger('price');
@@ -1591,7 +1672,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if(imageUrl!==null)p.imageUrl=imageUrl;
         if(deliveryMode!==null)p.deliveryMode=deliveryMode;
         if(zipFile){
-          if(!zipFile.name?.toLowerCase().endsWith('.zip'))return interaction.reply({content:'❌ ZIPファイル（.zip）を添付してください。',ephemeral:true});
+          if(!zipFile.name?.toLowerCase().endsWith('.zip'))return safeReply(interaction, {content:'❌ ZIPファイル（.zip）を添付してください。',ephemeral:true});
           p.zipFile={url:zipFile.url,name:zipFile.name,size:zipFile.size,contentType:zipFile.contentType||''};
           p.deliveryMode='zip';
         }
@@ -1601,58 +1682,58 @@ client.on(Events.InteractionCreate, async interaction => {
         if(role)p.roleId=role.id;
 
         saveStore(store);
-        return interaction.reply({content:`✅ 商品 \`${p.id}\`「${p.name}」を更新しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 商品 \`${p.id}\`「${p.name}」を更新しました。`,ephemeral:true});
       }
 
       if (n === 'product-url-update') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
         const p=(shop.products||[]).find(x=>x.id===interaction.options.getString('product_id',true));
-        if(!p)return interaction.reply({content:'❌ 商品が見つかりません。',ephemeral:true});
+        if(!p)return safeReply(interaction, {content:'❌ 商品が見つかりません。',ephemeral:true});
         const url=interaction.options.getString('gigafile_url',true).trim();
         const days=interaction.options.getInteger('url_expiry_days',true);
-        if(!/^https:\/\/(?:www\.)?gigafile\.nu\//i.test(url))return interaction.reply({content:'❌ ギガファイル便URLを指定してください。',ephemeral:true});
+        if(!/^https:\/\/(?:www\.)?gigafile\.nu\//i.test(url))return safeReply(interaction, {content:'❌ ギガファイル便URLを指定してください。',ephemeral:true});
         p.gigafileUrl=url;
         p.gigafileExpiresAt=new Date(Date.now()+days*86400000).toISOString();
         p.gigafileExpiryNotifiedAt=null;
         saveStore(store);
-        return interaction.reply({content:`✅ **${p.name}** のURLのみ更新しました。期限: **${days}日後**`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ **${p.name}** のURLのみ更新しました。期限: **${days}日後**`,ephemeral:true});
       }
 
       if (n === 'product-remove') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
 
         const productId=interaction.options.getString('product_id',true);
         const p=(shop.products||[]).find(x=>x.id===productId);
-        if(!p)return interaction.reply({content:'❌ 商品IDが見つかりません。',ephemeral:true});
+        if(!p)return safeReply(interaction, {content:'❌ 商品IDが見つかりません。',ephemeral:true});
         p.active=false;
         saveStore(store);
-        return interaction.reply({content:`🛑 商品 \`${p.id}\`「${p.name}」を販売停止しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`🛑 商品 \`${p.id}\`「${p.name}」を販売停止しました。`,ephemeral:true});
       }
 
       if (n === 'order-list') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 注文一覧を見る権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 注文一覧を見る権限がありません。',ephemeral:true});
 
         const orders=Object.values(store.orders)
           .filter(o=>Number(o.shopId)===Number(shop.id) && o.guildId===interaction.guildId)
           .sort((a,b)=>Number(b.id)-Number(a.id))
           .slice(0,30);
         const lines=orders.map(o=>`#${o.id} / <@${o.userId}> / x${o.qty} / ¥${Number(o.total).toLocaleString()} / ${o.status}`);
-        return interaction.reply({content:lines.join('\n')||'注文はありません。',ephemeral:true});
+        return safeReply(interaction, {content:lines.join('\n')||'注文はありません。',ephemeral:true});
       }
 
       if (n === 'shop-panel') {
         const shop=store.shops[interaction.options.getInteger('shop_id')];
-        if(!shop||shop.guildId!==interaction.guildId||shop.active===false)return interaction.reply({content:'❌ 自販機が見つかりません。',ephemeral:true});
-        if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        if(!shop||shop.guildId!==interaction.guildId||shop.active===false)return safeReply(interaction, {content:'❌ 自販機が見つかりません。',ephemeral:true});
+        if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
         const panel=buildShopSalesPanel(shop);
-        if(!panel)return interaction.reply({content:'❌ 販売可能な商品がありません。',ephemeral:true});
-        return interaction.reply(panel);
+        if(!panel)return safeReply(interaction, {content:'❌ 販売可能な商品がありません。',ephemeral:true});
+        return safeReply(interaction, panel);
       }
 
       if (n === 'verify-panel') {
@@ -1660,14 +1741,14 @@ client.on(Events.InteractionCreate, async interaction => {
         const raw=(interaction.options.getString('additional_roles')||'').trim();
         const extraIds=raw ? raw.split(/[\s,、，]+/).filter(Boolean).map(v=>v.replace(/^<@&([0-9]+)>$/,'$1')) : [];
         const ids=[...new Set([firstRole.id,...extraIds])];
-        if(ids.length>20)return interaction.reply({content:'❌ 1パネルにつき最大20ロールまで設定できます。',ephemeral:true});
-        if(ids.some(id=>!/^\d{17,22}$/.test(id)))return interaction.reply({content:'❌ 追加ロールにはロールIDまたはロールメンションをカンマ区切りで入力してください。',ephemeral:true});
+        if(ids.length>20)return safeReply(interaction, {content:'❌ 1パネルにつき最大20ロールまで設定できます。',ephemeral:true});
+        if(ids.some(id=>!/^\d{17,22}$/.test(id)))return safeReply(interaction, {content:'❌ 追加ロールにはロールIDまたはロールメンションをカンマ区切りで入力してください。',ephemeral:true});
         const roles=[];
         for(const id of ids){
           const role=await interaction.guild.roles.fetch(id).catch(()=>null);
-          if(!role)return interaction.reply({content:`❌ ロールID ${id} が見つかりません。`,ephemeral:true});
+          if(!role)return safeReply(interaction, {content:`❌ ロールID ${id} が見つかりません。`,ephemeral:true});
           const problem=rolePanelProblem(interaction.guild,role);
-          if(problem)return interaction.reply({content:`❌ ${role.name}: ${problem}`,ephemeral:true});
+          if(problem)return safeReply(interaction, {content:`❌ ${role.name}: ${problem}`,ephemeral:true});
           roles.push(role);
         }
         const g=guildData(store,interaction.guildId);
@@ -1678,7 +1759,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const panelId=`${Date.now().toString(36)}${Math.random().toString(36).slice(2,7)}`;
         g.verificationPanels[panelId]={name:applicationName,description:applicationDescription,roleIds:roles.map(r=>r.id),approvalChannelId:approvalChannel.id};
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           embeds:[new EmbedBuilder().setTitle(`✅ ${applicationName}`)
             .setDescription(`${applicationDescription}\n\n下の **申請する** ボタンを押してください。`)
             .addFields({name:'承認後のロール',value:roles.map(r=>`<@&${r.id}>`).join('\n').slice(0,1024)},
@@ -1695,7 +1776,7 @@ client.on(Events.InteractionCreate, async interaction => {
           .sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
 
         if(!pending.length){
-          return interaction.reply({
+          return safeReply(interaction, {
             content:'🔒 **認証管理者ページ**\n現在、承認待ちの認証申請はありません。',
             ephemeral:true
           });
@@ -1726,7 +1807,7 @@ client.on(Events.InteractionCreate, async interaction => {
           )
         );
 
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔒 **認証管理者ページ**\n承認待ち: **${pending.length}件**${pending.length>5?'（先頭5件を表示）':''}`,
           embeds,
           components,
@@ -1739,7 +1820,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const ch=interaction.options.getChannel('approval_channel',true);
         g.verificationReviewChannelId=ch.id;
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ 認証申請の承認通知先を ${ch} に変更しました。`,
           ephemeral:true
         });
@@ -1749,7 +1830,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId);
         const roleId=g.verificationRoleId;
         const role=roleId ? await interaction.guild.roles.fetch(roleId).catch(()=>null) : null;
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔒 **認証設定**\n認証ロール: ${role?`<@&${role.id}>`:'未設定 / 削除済み'}\n承認通知先: ${g.verificationReviewChannelId?`<#${g.verificationReviewChannelId}>`:'未設定'}\nBOTのロール管理権限: ${interaction.guild.members.me?.permissions.has(PermissionFlagsBits.ManageRoles)?'✅':'❌'}`,
           ephemeral:true
         });
@@ -1759,33 +1840,33 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId);
         const type=interaction.options.getString('type',true);
         const channel=interaction.options.getChannel('channel');
-        if(type!=='off' && !channel) return interaction.reply({content:'❌ 通知ONの場合は `channel` を指定してください。',ephemeral:true});
+        if(type!=='off' && !channel) return safeReply(interaction, {content:'❌ 通知ONの場合は `channel` を指定してください。',ephemeral:true});
         if(type==='join'){ g.joinLogChannelId=channel.id; g.leaveLogChannelId=null; }
         if(type==='leave'){ g.joinLogChannelId=null; g.leaveLogChannelId=channel.id; }
         if(type==='both'){ g.joinLogChannelId=channel.id; g.leaveLogChannelId=channel.id; }
         if(type==='off'){ g.joinLogChannelId=null; g.leaveLogChannelId=null; }
         saveStore(store);
-        return interaction.reply({content:`✅ **入退室通知設定を更新しました**\n通知モード: **${type==='join'?'入室のみ':type==='leave'?'退出のみ':type==='both'?'入室＋退出':'OFF'}**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'OFF'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'OFF'}\n\n※ Developer Portal の **SERVER MEMBERS INTENT** をONにしてください。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ **入退室通知設定を更新しました**\n通知モード: **${type==='join'?'入室のみ':type==='leave'?'退出のみ':type==='both'?'入室＋退出':'OFF'}**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'OFF'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'OFF'}\n\n※ Developer Portal の **SERVER MEMBERS INTENT** をONにしてください。`,ephemeral:true});
       }
 
       if (n === 'welcome-settings') {
         const g=guildData(store,interaction.guildId);
         const title=interaction.options.getString('title');
         const verification=interaction.options.getChannel('verification_channel');
-        if(!title&&!verification)return interaction.reply({content:'❌ `title` または `verification_channel` を指定してください。',ephemeral:true});
+        if(!title&&!verification)return safeReply(interaction, {content:'❌ `title` または `verification_channel` を指定してください。',ephemeral:true});
         if(title)g.joinTitle=title.slice(0,256);
         if(verification)g.verificationPanelChannelId=verification.id;
         saveStore(store);
-        return interaction.reply({content:`✅ 参加案内を更新しました。\nタイトル: **${g.joinTitle}**\n認証パネル: ${g.verificationPanelChannelId?`<#${g.verificationPanelChannelId}>`:'未設定'}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 参加案内を更新しました。\nタイトル: **${g.joinTitle}**\n認証パネル: ${g.verificationPanelChannelId?`<#${g.verificationPanelChannelId}>`:'未設定'}`,ephemeral:true});
       }
       if (n === 'welcome-status') {
         const g=guildData(store,interaction.guildId);
-        return interaction.reply({content:`👋 **参加案内設定**\nタイトル: **${g.joinTitle||'📥 メンバー参加'}**\n参加通知先: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'未設定'}\n認証パネル: ${g.verificationPanelChannelId?`<#${g.verificationPanelChannelId}>`:'未設定'}`,ephemeral:true});
+        return safeReply(interaction, {content:`👋 **参加案内設定**\nタイトル: **${g.joinTitle||'📥 メンバー参加'}**\n参加通知先: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'未設定'}\n認証パネル: ${g.verificationPanelChannelId?`<#${g.verificationPanelChannelId}>`:'未設定'}`,ephemeral:true});
       }
 
       if (n === 'join-leave-status') {
         const g=guildData(store,interaction.guildId);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔒 **入退室通知設定**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'未設定'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'未設定'}\nSERVER MEMBERS INTENT: Discord Developer Portal側でON必須`,
           ephemeral:true
         });
@@ -1798,27 +1879,27 @@ client.on(Events.InteractionCreate, async interaction => {
         pendingRoleCreates.set(`${interaction.guildId}:${interaction.user.id}`,{name,permissions:perms[permission]??0n,mentionable:interaction.options.getBoolean('mentionable')??false,hoist:interaction.options.getBoolean('hoist')??false,at:Date.now()});
         const colors=[['赤','#ED4245'],['橙','#E67E22'],['黄','#F1C40F'],['緑','#57F287'],['青','#3498DB'],['紫','#9B59B6'],['桃','#EB459E'],['水色','#1ABC9C'],['白','#FFFFFF'],['灰','#95A5A6'],['黒','#23272A']];
         const menu=new StringSelectMenuBuilder().setCustomId('rolecolor').setPlaceholder('ロールカラーを選択').addOptions(colors.map(([label,value])=>({label,value,description:value})));
-        return interaction.reply({content:`🎨 **${name}** の色を選択してください。`,components:[new ActionRowBuilder().addComponents(menu)],ephemeral:true});
+        return safeReply(interaction, {content:`🎨 **${name}** の色を選択してください。`,components:[new ActionRowBuilder().addComponents(menu)],ephemeral:true});
       }
       if (n === 'role-delete') {
         const role=interaction.options.getRole('role',true);
         const problem=rolePanelProblem(interaction.guild,role);
-        if(problem)return interaction.reply({content:`❌ ${problem}`,ephemeral:true});
+        if(problem)return safeReply(interaction, {content:`❌ ${problem}`,ephemeral:true});
         await role.delete(`管理者 ${interaction.user.tag} が /role-delete を実行`);
         const g=guildData(store,interaction.guildId); for(const cfg of Object.values(g.rolePanels||{}))cfg.roleOptions=(cfg.roleOptions||[]).filter(x=>x.roleId!==role.id); saveStore(store);
-        return interaction.reply({content:`✅ ロール **${role.name}** を削除しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ ロール **${role.name}** を削除しました。`,ephemeral:true});
       }
       if (n === 'weather-setup') {
         const g=guildData(store,interaction.guildId),area=interaction.options.getString('area',true),ch=interaction.options.getChannel('channel',true),time=interaction.options.getString('time',true);
         const enabled=interaction.options.getBoolean('enabled') ?? true;
-        if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time))return interaction.reply({content:'❌ 時刻は HH:MM 形式です。例: 07:00',ephemeral:true});
+        if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time))return safeReply(interaction, {content:'❌ 時刻は HH:MM 形式です。例: 07:00',ephemeral:true});
         const regions=area==='全国'?PREFECTURES.map(x=>x[0]):expandWeatherRegion(area);
-        if(!regions.length)return interaction.reply({content:`❌ 対象地域「${area}」を展開できませんでした。`,ephemeral:true});
+        if(!regions.length)return safeReply(interaction, {content:`❌ 対象地域「${area}」を展開できませんでした。`,ephemeral:true});
         // 一括設定時は旧ルート設定を破棄し、指定チャンネルへ確実に統一する。
         g.weatherRegions=[...new Set(regions)]; g.weatherChannelId=ch.id; g.weatherChannelRoutes={}; g.weatherAutoTime=time; g.weatherAutoEnabled=enabled; g.lastWeatherPostDate=null; g.weatherLastSentByChannel={};
         g.weatherSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1833,11 +1914,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId),area=interaction.options.getString('area',true),ch=interaction.options.getChannel('channel',true),min=interaction.options.getInteger('min_intensity')||3;
         const enabled=interaction.options.getBoolean('enabled') ?? true;
         const regions=area==='全国'?[]:expandWeatherRegion(area);
-        if(area!=='全国' && !regions.length)return interaction.reply({content:`❌ 対象地域「${area}」を展開できませんでした。`,ephemeral:true});
+        if(area!=='全国' && !regions.length)return safeReply(interaction, {content:`❌ 対象地域「${area}」を展開できませんでした。`,ephemeral:true});
         g.earthquakeRegions=regions; g.earthquakeChannelId=ch.id; g.minIntensity=min; g.earthquakeAutoEnabled=enabled;
         g.earthquakeSetupUpdatedAt=new Date().toISOString(); saveStore(store);
         const testNow=interaction.options.getBoolean('test_now') ?? true;
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         let testResult='テスト配信なし';
         if(testNow){
           try{
@@ -1864,9 +1945,9 @@ client.on(Events.InteractionCreate, async interaction => {
           if(!role||rolePanelProblem(interaction.guild,role))continue;
           valid.push({roleId:role.id,label:(opt.label||role.name).slice(0,80),roleName:role.name,mode:opt.mode||'instant'});
         }
-        if(!valid.length)return interaction.reply({content:'❌ このチャンネルにはロールがありません。先に `/role-add` をこのチャンネルで実行してください。',ephemeral:true});
+        if(!valid.length)return safeReply(interaction, {content:'❌ このチャンネルにはロールがありません。先に `/role-add` をこのチャンネルで実行してください。',ephemeral:true});
         const page=0;
-        const msg=await interaction.reply({...buildChannelRolePanel(channelId,cfg,valid,page),fetchReply:true});
+        const msg=await safeReply(interaction, {...buildChannelRolePanel(channelId,cfg,valid,page),fetchReply:true});
         cfg.panelMessageId=msg.id;saveStore(store);return;
       }
 
@@ -1878,11 +1959,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const mode=interaction.options.getString('mode')||'instant';
         const approvalChannel=interaction.options.getChannel('approval_channel');
         const reviewId=approvalChannel?.id||g.verificationReviewChannelId;
-        if(mode==='approval'&&!reviewId)return interaction.reply({content:'❌ 承認制ロールには approval_channel を指定するか /verify-settings で通知先を設定してください。',ephemeral:true});
+        if(mode==='approval'&&!reviewId)return safeReply(interaction, {content:'❌ 承認制ロールには approval_channel を指定するか /verify-settings で通知先を設定してください。',ephemeral:true});
         const added=[];
         for(let i=0;i<roles.length;i++){
           const role=roles[i],problem=rolePanelProblem(interaction.guild,role);
-          if(problem)return interaction.reply({content:`❌ ${role.name}: ${problem}`,ephemeral:true});
+          if(problem)return safeReply(interaction, {content:`❌ ${role.name}: ${problem}`,ephemeral:true});
           const custom=i===0?interaction.options.getString('label'):null;
           const label=(custom||role.name).slice(0,80);
           cfg.roleOptions=(cfg.roleOptions||[]).filter(x=>x.roleId!==role.id);
@@ -1901,7 +1982,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if(panelMessage)await panelMessage.edit(payload);
         else { panelMessage=await target.send(payload); cfg.panelMessageId=panelMessage.id; }
         saveStore(store);
-        return interaction.reply({content:`✅ <#${target.id}> に **${roles.length}個**のロールを追加し、ロールボタンを自動更新しました。\n${added.join('\n')}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ <#${target.id}> に **${roles.length}個**のロールを追加し、ロールボタンを自動更新しました。\n${added.join('\n')}`,ephemeral:true});
       }
 
       if (n === 'role-list') {
@@ -1909,7 +1990,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const target=interaction.options.getChannel('channel')||interaction.channel;
         const cfg=g.rolePanels[target.id]||{roleOptions:[]};
         const lines=(cfg.roleOptions||[]).map((x,i)=>`${i+1}. **${x.label}** → <@&${x.roleId}>（${x.mode==='approval'?'承認制':'即時付与'}）`);
-        return interaction.reply({content:`🎭 <#${target.id}> のロール設定\n${lines.join('\n')||'保存済みロールはありません。'}`,ephemeral:true});
+        return safeReply(interaction, {content:`🎭 <#${target.id}> のロール設定\n${lines.join('\n')||'保存済みロールはありません。'}`,ephemeral:true});
       }
 
       if (n === 'role-remove') {
@@ -1920,11 +2001,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const before=(cfg.roleOptions||[]).length;
         cfg.roleOptions=(cfg.roleOptions||[]).filter(x=>x.roleId!==role.id);
         saveStore(store);
-        return interaction.reply({content:before!==cfg.roleOptions.length?`✅ <#${target.id}> から ${role} を削除しました。`:'❌ このチャンネルには登録されていません。',ephemeral:true});
+        return safeReply(interaction, {content:before!==cfg.roleOptions.length?`✅ <#${target.id}> から ${role} を削除しました。`:'❌ このチャンネルには登録されていません。',ephemeral:true});
       }
 
       if (n === 'ticket-panel') {
-        return interaction.reply({
+        return safeReply(interaction, {
           embeds:[new EmbedBuilder().setTitle('🎫 サポートチケット').setDescription('ボタンを押してチケットを作成してください。')],
           components:[new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('ticket:create').setLabel('チケット作成').setStyle(ButtonStyle.Primary)
@@ -1937,19 +2018,19 @@ client.on(Events.InteractionCreate, async interaction => {
         const category=interaction.options.getChannel('category');
         const support=interaction.options.getRole('support_role');
         const logChannel=interaction.options.getChannel('log_channel');
-        if(!category&&!support&&!logChannel)return interaction.reply({content:'❌ カテゴリ・サポートロール・ログチャンネルのいずれかを指定してください。',ephemeral:true});
+        if(!category&&!support&&!logChannel)return safeReply(interaction, {content:'❌ カテゴリ・サポートロール・ログチャンネルのいずれかを指定してください。',ephemeral:true});
         if(category)g.ticketCategoryId=category.id;
         if(support)g.ticketSupportRoleId=support.id;
         if(logChannel){
           const me=interaction.guild.members.me || await interaction.guild.members.fetchMe();
           const permissions=logChannel.permissionsFor(me);
           if(!permissions?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.EmbedLinks])){
-            return interaction.reply({content:'❌ ログチャンネルでBOTに「チャンネルを見る」「メッセージを送信」「埋め込みリンク」の権限を付与してください。設定は保存していません。',ephemeral:true});
+            return safeReply(interaction, {content:'❌ ログチャンネルでBOTに「チャンネルを見る」「メッセージを送信」「埋め込みリンク」の権限を付与してください。設定は保存していません。',ephemeral:true});
           }
           g.ticketLogChannelId=logChannel.id;
         }
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ チケット設定を保存しました。\nカテゴリ: ${g.ticketCategoryId?`<#${g.ticketCategoryId}>`:'未設定'}\nサポートロール: ${g.ticketSupportRoleId?`<@&${g.ticketSupportRoleId}>`:'未設定'}\n作成ログ: ${g.ticketLogChannelId?`<#${g.ticketLogChannelId}>`:'未設定'}`,
           ephemeral:true
         });
@@ -1959,28 +2040,28 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId);
         const channel=interaction.options.getChannel('channel');
         const disable=interaction.options.getBoolean('disable') ?? false;
-        if(disable && channel)return interaction.reply({content:'❌ channel と disable:true は同時に指定できません。',ephemeral:true});
+        if(disable && channel)return safeReply(interaction, {content:'❌ channel と disable:true は同時に指定できません。',ephemeral:true});
         if(disable){
           g.ticketLogChannelId=null;
           saveStore(store);
-          return interaction.reply({content:'✅ チケット作成ログの自動投稿を停止しました。',ephemeral:true});
+          return safeReply(interaction, {content:'✅ チケット作成ログの自動投稿を停止しました。',ephemeral:true});
         }
         if(channel){
           const me=interaction.guild.members.me || await interaction.guild.members.fetchMe();
           const permissions=channel.permissionsFor(me);
           if(!permissions?.has([PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.EmbedLinks])){
-            return interaction.reply({content:'❌ BOTに「チャンネルを見る」「メッセージを送信」「埋め込みリンク」の権限が必要です。投稿先は変更していません。',ephemeral:true});
+            return safeReply(interaction, {content:'❌ BOTに「チャンネルを見る」「メッセージを送信」「埋め込みリンク」の権限が必要です。投稿先は変更していません。',ephemeral:true});
           }
           g.ticketLogChannelId=channel.id;
           saveStore(store);
-          return interaction.reply({content:`✅ チケット作成ログの投稿先を ${channel} に変更しました。次のチケット作成から適用されます。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ チケット作成ログの投稿先を ${channel} に変更しました。次のチケット作成から適用されます。`,ephemeral:true});
         }
-        return interaction.reply({content:`🎫 チケット作成ログの投稿先: ${g.ticketLogChannelId?`<#${g.ticketLogChannelId}>`:'未設定（停止中）'}`,ephemeral:true});
+        return safeReply(interaction, {content:`🎫 チケット作成ログの投稿先: ${g.ticketLogChannelId?`<#${g.ticketLogChannelId}>`:'未設定（停止中）'}`,ephemeral:true});
       }
 
       if (n === 'ticket-status') {
         const g=guildData(store,interaction.guildId);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔒 **チケット設定**\nカテゴリ: ${g.ticketCategoryId?`<#${g.ticketCategoryId}>`:'未設定'}\nサポートロール: ${g.ticketSupportRoleId?`<@&${g.ticketSupportRoleId}>`:'未設定'}\n作成ログ: ${g.ticketLogChannelId?`<#${g.ticketLogChannelId}>`:'未設定'}\nオープン: ${Object.values(store.tickets||{}).filter(t=>t.guildId===interaction.guildId&&t.status==='open').length}件`,
           ephemeral:true
         });
@@ -1993,14 +2074,14 @@ client.on(Events.InteractionCreate, async interaction => {
         const mode=interaction.options.getString('mode') || 'contains';
         g.autoReplies[keyword]={reply,mode};
         saveStore(store);
-        return interaction.reply({content:`✅ 自動返信を追加しました。（${mode==='exact'?'完全一致':'部分一致'}）`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 自動返信を追加しました。（${mode==='exact'?'完全一致':'部分一致'}）`,ephemeral:true});
       }
 
       if (n === 'autoreply-remove') {
         const g=guildData(store,interaction.guildId);
         delete g.autoReplies[interaction.options.getString('keyword',true)];
         saveStore(store);
-        return interaction.reply({content:'✅ 自動返信を削除しました。',ephemeral:true});
+        return safeReply(interaction, {content:'✅ 自動返信を削除しました。',ephemeral:true});
       }
 
       if (n === 'autoreply-list') {
@@ -2009,7 +2090,7 @@ client.on(Events.InteractionCreate, async interaction => {
           const data=typeof v==='string'?{reply:v,mode:'contains'}:v;
           return `• **${k}** [${data.mode==='exact'?'完全':'部分'}] → ${data.reply}`;
         });
-        return interaction.reply({content:lines.join('\n')||'自動返信はありません。',ephemeral:true});
+        return safeReply(interaction, {content:lines.join('\n')||'自動返信はありません。',ephemeral:true});
       }
 
       if (n === 'guild-settings') {
@@ -2023,12 +2104,12 @@ client.on(Events.InteractionCreate, async interaction => {
         if(e)g.earthquakeChannelId=e.id;
         if(w)g.weatherChannelId=w.id;
         saveStore(store);
-        return interaction.reply({content:'✅ サーバー設定を保存しました。',ephemeral:true});
+        return safeReply(interaction, {content:'✅ サーバー設定を保存しました。',ephemeral:true});
       }
 
       if (n === 'guild-status') {
         const g=guildData(store,interaction.guildId);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`🔒 **サーバー設定**\n参加通知: ${g.joinLogChannelId?`<#${g.joinLogChannelId}>`:'未設定'}\n退出通知: ${g.leaveLogChannelId?`<#${g.leaveLogChannelId}>`:'未設定'}\n天気通知: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定'}\n地震通知: ${g.earthquakeChannelId?`<#${g.earthquakeChannelId}>`:'未設定'}\n認証ロール: ${g.verificationRoleId?`<@&${g.verificationRoleId}>`:'未設定'}\n認証承認通知先: ${g.verificationReviewChannelId?`<#${g.verificationReviewChannelId}>`:'未設定'}\nチケットカテゴリ: ${g.ticketCategoryId?`<#${g.ticketCategoryId}>`:'未設定'}\nサポートロール: ${g.ticketSupportRoleId?`<@&${g.ticketSupportRoleId}>`:'未設定'}`,
           ephemeral:true
         });
@@ -2049,26 +2130,26 @@ client.on(Events.InteractionCreate, async interaction => {
         };
         g[map[key]]=value;
         saveStore(store);
-        return interaction.reply({content:'✅ 旧版互換設定を保存しました。',ephemeral:true});
+        return safeReply(interaction, {content:'✅ 旧版互換設定を保存しました。',ephemeral:true});
       }
 
       if (n === 'media-add') {
         const g=guildData(store,interaction.guildId), url=interaction.options.getString('url',true);
-        if(!validHttpUrl(url))return interaction.reply({content:'❌ http/https URLを指定してください。',ephemeral:true});
+        if(!validHttpUrl(url))return safeReply(interaction, {content:'❌ http/https URLを指定してください。',ephemeral:true});
         const item={id:g.nextMediaId++,name:interaction.options.getString('name',true).slice(0,100),url,tags:(interaction.options.getString('tags')||'').split(/[\s,、]+/).filter(Boolean).slice(0,30),type:interaction.options.getString('type')||'image',addedBy:interaction.user.id,createdAt:new Date().toISOString()};
         g.mediaLibrary.push(item); saveStore(store);
-        return interaction.reply({content:`✅ メディア #${item.id} **${item.name}** を登録しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ メディア #${item.id} **${item.name}** を登録しました。`,ephemeral:true});
       }
       if (n === 'media-search') {
         const g=guildData(store,interaction.guildId), q=interaction.options.getString('keyword',true).toLowerCase();
         const found=(g.mediaLibrary||[]).filter(x=>`${x.name} ${(x.tags||[]).join(' ')}`.toLowerCase().includes(q)).slice(0,10);
-        if(!found.length)return interaction.reply({content:'🔎 該当する画像・動画はありません。',ephemeral:true});
-        return interaction.reply({content:found.map(x=>`**#${x.id} ${x.type==='video'?'🎬':'🖼️'} ${x.name}**\n${x.url}\nタグ: ${(x.tags||[]).join(', ')||'なし'}`).join('\n\n')});
+        if(!found.length)return safeReply(interaction, {content:'🔎 該当する画像・動画はありません。',ephemeral:true});
+        return safeReply(interaction, {content:found.map(x=>`**#${x.id} ${x.type==='video'?'🎬':'🖼️'} ${x.name}**\n${x.url}\nタグ: ${(x.tags||[]).join(', ')||'なし'}`).join('\n\n')});
       }
       if (n === 'media-remove') {
         const g=guildData(store,interaction.guildId), id=interaction.options.getInteger('id',true), before=g.mediaLibrary.length;
         g.mediaLibrary=g.mediaLibrary.filter(x=>x.id!==id); saveStore(store);
-        return interaction.reply({content:before===g.mediaLibrary.length?'❌ メディアIDが見つかりません。':`✅ メディア #${id} を削除しました。`,ephemeral:true});
+        return safeReply(interaction, {content:before===g.mediaLibrary.length?'❌ メディアIDが見つかりません。':`✅ メディア #${id} を削除しました。`,ephemeral:true});
       }
       if (n === 'rsshub-status') {
         const base=SOCIAL_RSS_BRIDGES[0];
@@ -2076,8 +2157,8 @@ client.on(Events.InteractionCreate, async interaction => {
           const url=new URL(base);
           if(!['http:','https:'].includes(url.protocol))throw new Error('URL形式が不正です');
           const response=await fetch(url,{signal:AbortSignal.timeout(8000)});
-          return interaction.reply({content:`📡 RSSHub: ${response.ok?'接続成功':'応答あり（HTTP '+response.status+'）'}\n接続先: ${url.origin}\n※ Xのフィード取得可否は /latest-add で個別に確認してください。`,ephemeral:true});
-        }catch(e){return interaction.reply({content:`❌ RSSHub接続失敗: ${String(e.message||e).slice(0,300)}\n.env の SOCIAL_RSS_BRIDGE_URL と Docker起動状態を確認してください。`,ephemeral:true});}
+          return safeReply(interaction, {content:`📡 RSSHub: ${response.ok?'接続成功':'応答あり（HTTP '+response.status+'）'}\n接続先: ${url.origin}\n※ Xのフィード取得可否は /latest-add で個別に確認してください。`,ephemeral:true});
+        }catch(e){return safeReply(interaction, {content:`❌ RSSHub接続失敗: ${String(e.message||e).slice(0,300)}\n.env の SOCIAL_RSS_BRIDGE_URL と Docker起動状態を確認してください。`,ephemeral:true});}
       }
       // Xプロフィールを複数登録・管理。既存のSNS監視と同じ保存領域を利用。
       if (n === 'x-add') {
@@ -2086,9 +2167,9 @@ client.on(Events.InteractionCreate, async interaction => {
         const channel=interaction.options.getChannel('channel',true);
         const platform=detectSocialPlatform(input);
         const username=socialUsername('twitter',input);
-        if(platform!=='twitter'||!username||!/^\w{1,15}$/.test(username))return interaction.reply({content:'❌ XのプロフィールURL（https://x.com/ユーザー名）を指定してください。',ephemeral:true});
-        if(!channel?.isTextBased())return interaction.reply({content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(platform!=='twitter'||!username||!/^\w{1,15}$/.test(username))return safeReply(interaction, {content:'❌ XのプロフィールURL（https://x.com/ユーザー名）を指定してください。',ephemeral:true});
+        if(!channel?.isTextBased())return safeReply(interaction, {content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         try{
           const resolved=await resolveSocialFeedAuto('twitter',input);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',input)):await rssParser.parseURL(resolved.feedUrl);
@@ -2104,25 +2185,25 @@ client.on(Events.InteractionCreate, async interaction => {
       if(n==='x-list'){
         const g=guildData(store,interaction.guildId),sources=(g.socialSources||[]).filter(x=>x.platform==='twitter');
         const pages=splitDiscordBlocks(`📡 **X監視一覧（${sources.length}件）**`,sources.map(x=>`#${x.id} ${x.profileUrl} → <#${x.channelId}>${x.lastError?' ⚠️ '+x.lastError:''}`),1900);
-        await interaction.reply({content:pages[0],ephemeral:true});
+        await safeReply(interaction, {content:pages[0],ephemeral:true});
         for(const page of pages.slice(1))await interaction.followUp({content:page,ephemeral:true});
         return;
       }
       if(n==='x-edit'||n==='x-remove'||n==='x-test'){
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true);
         const source=(g.socialSources||[]).find(x=>x.id===id&&x.platform==='twitter');
-        if(!source)return interaction.reply({content:'❌ 指定したX登録IDが見つかりません。',ephemeral:true});
+        if(!source)return safeReply(interaction, {content:'❌ 指定したX登録IDが見つかりません。',ephemeral:true});
         if(n==='x-remove'){
           g.socialSources=g.socialSources.filter(x=>x!==source);delete g.socialSeen[id];saveStore(store);
-          return interaction.reply({content:`✅ X監視 #${id} を削除しました。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ X監視 #${id} を削除しました。`,ephemeral:true});
         }
         if(n==='x-edit'){
           const channel=interaction.options.getChannel('channel',true);
-          if(!channel?.isTextBased())return interaction.reply({content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
+          if(!channel?.isTextBased())return safeReply(interaction, {content:'❌ テキストチャンネルを指定してください。',ephemeral:true});
           source.channelId=channel.id;saveStore(store);
-          return interaction.reply({content:`✅ X監視 #${id} の投稿先を ${channel} に変更しました。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ X監視 #${id} の投稿先を ${channel} に変更しました。`,ephemeral:true});
         }
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 最新投稿が取得できませんでした。');
@@ -2139,26 +2220,26 @@ client.on(Events.InteractionCreate, async interaction => {
         try{
           if(platform){ resolved=await resolveSocialFeedAuto(platform,input); name=`${platform} ${socialUsername(platform,input)||''}`.trim(); }
           else { await rssParser.parseURL(input); resolved={feedUrl:input,method:'RSS/Atom'}; name=new URL(input).hostname; }
-        }catch(e){return interaction.reply({content:`❌ URLから取得方式を判定できませんでした。\n${String(e.message||e).slice(0,800)}`,ephemeral:true});}
+        }catch(e){return safeReply(interaction, {content:`❌ URLから取得方式を判定できませんでした。\n${String(e.message||e).slice(0,800)}`,ephemeral:true});}
         const id=g.nextSocialSourceId++;
         const initialFeed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',input)):await rssParser.parseURL(resolved.feedUrl);
         g.socialSources.push({id,name,platform:platform||'rss',profileUrl:input,feedUrl:resolved.feedUrl,channelId:channel.id,method:resolved.method,active:true});
         g.socialSeen??={};g.socialSeen[id]=(initialFeed.items||[]).slice(0,50).map(newsItemKey);saveStore(store);
-        return interaction.reply({content:`✅ 最新情報 #${id} を登録しました。\n取得方式: **${resolved.method}**\n投稿先: ${channel}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 最新情報 #${id} を登録しました。\n取得方式: **${resolved.method}**\n投稿先: ${channel}`,ephemeral:true});
       }
 
       if (n === 'social-source-add') {
         const g=guildData(store,interaction.guildId);
         const profileUrl=interaction.options.getString('profile_url',true).trim();
         const channelUrl=interaction.options.getString('channel_url',true).trim();
-        if(!validNewsUrl(profileUrl))return interaction.reply({content:'❌ プロフィールURLが正しくありません。',ephemeral:true});
+        if(!validNewsUrl(profileUrl))return safeReply(interaction, {content:'❌ プロフィールURLが正しくありません。',ephemeral:true});
         const platform=detectSocialPlatform(profileUrl);
-        if(!platform)return interaction.reply({content:'❌ 対応URLではありません。X / Twitter・YouTube・Instagram のプロフィールURLを貼ってください。',ephemeral:true});
+        if(!platform)return safeReply(interaction, {content:'❌ 対応URLではありません。X / Twitter・YouTube・Instagram のプロフィールURLを貼ってください。',ephemeral:true});
         const parsed=parseDiscordChannelUrl(channelUrl,interaction.guildId);
-        if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのURLではありません。',ephemeral:true});
+        if(!parsed)return safeReply(interaction, {content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのURLではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
-        if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定したDiscordチャンネルへ投稿できません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!ch?.isTextBased())return safeReply(interaction, {content:'❌ 指定したDiscordチャンネルへ投稿できません。',ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         try{
           const resolved=await resolveSocialFeedAuto(platform,profileUrl);
           const feed=platform==='twitter'?await fetchFxTwitterTimeline(socialUsername('twitter',profileUrl)):await rssParser.parseURL(resolved.feedUrl);
@@ -2178,22 +2259,22 @@ client.on(Events.InteractionCreate, async interaction => {
       if (n === 'social-source-remove') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true);
         const src=g.socialSources.find(x=>x.id===id);
-        if(!src)return interaction.reply({content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
+        if(!src)return safeReply(interaction, {content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
         g.socialSources=g.socialSources.filter(x=>x.id!==id);delete g.socialSeen[id];saveStore(store);
-        return interaction.reply({content:`✅ SNSソース #${id} を削除しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ SNSソース #${id} を削除しました。`,ephemeral:true});
       }
       if (n === 'social-list') {
         const g=guildData(store,interaction.guildId);
         const lines=g.socialSources.map(s=>`**#${s.id} ${s.platform}** ${s.enabled===false?'⏸️':'✅'}\n${s.profileUrl}\n取得: ${s.method||'自動'}\n投稿先: <#${s.channelId}>${s.lastError?`\n⚠️ ${s.lastError}`:''}`);
         const pages=splitDiscordBlocks(`📡 **SNS最新情報**\n登録: **${g.socialSources.length}件**`,lines,1900);
-        await interaction.reply({content:pages[0],ephemeral:true});
+        await safeReply(interaction, {content:pages[0],ephemeral:true});
         for(const p of pages.slice(1))await interaction.followUp({content:p,ephemeral:true});
         return;
       }
       if (n === 'social-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.socialSources.find(x=>x.id===id);
-        if(!source)return interaction.reply({content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!source)return safeReply(interaction, {content:'❌ SNSソースIDが見つかりません。',ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         try{
           const feed=await fetchSocialSource(source),item=feed.items?.[0];
           if(!item)return interaction.editReply('❌ 投稿を取得できません。');
@@ -2209,12 +2290,12 @@ client.on(Events.InteractionCreate, async interaction => {
         const name=interaction.options.getString('name',true).trim();
         const feedUrl=interaction.options.getString('feed_url',true).trim();
         const channelUrl=interaction.options.getString('channel_url',true).trim();
-        if(!validNewsUrl(feedUrl))return interaction.reply({content:'❌ RSS/Atom URLが正しくありません。',ephemeral:true});
+        if(!validNewsUrl(feedUrl))return safeReply(interaction, {content:'❌ RSS/Atom URLが正しくありません。',ephemeral:true});
         const parsed=parseDiscordChannelUrl(channelUrl,interaction.guildId);
-        if(!parsed)return interaction.reply({content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのチャンネルではありません。',ephemeral:true});
+        if(!parsed)return safeReply(interaction, {content:'❌ DiscordチャンネルURLが正しくないか、このサーバーのチャンネルではありません。',ephemeral:true});
         const ch=interaction.guild.channels.cache.get(parsed.channelId)||await interaction.guild.channels.fetch(parsed.channelId).catch(()=>null);
-        if(!ch?.isTextBased())return interaction.reply({content:'❌ 指定チャンネルへ投稿できません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!ch?.isTextBased())return safeReply(interaction, {content:'❌ 指定チャンネルへ投稿できません。',ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         let feed;
         try{feed=await fetchNewsFeed({feedUrl});}catch(e){console.error(e);return interaction.editReply('❌ フィードを取得できません。通常の記事URLではなくRSS/Atom URLを指定してください。');}
         const id=g.nextNewsSourceId++;
@@ -2224,24 +2305,24 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (n === 'news-source-remove') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.newsSources.find(x=>x.id===id);
-        if(!source)return interaction.reply({content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
+        if(!source)return safeReply(interaction, {content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
         g.newsSources=g.newsSources.filter(x=>x.id!==id);delete g.newsSeen[id];saveStore(store);
-        return interaction.reply({content:`✅ #${id} ${source.name} を削除しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ #${id} ${source.name} を削除しました。`,ephemeral:true});
       }
       if (n === 'news-list') {
         const g=guildData(store,interaction.guildId),lines=g.newsSources.map(s=>`**#${s.id} ${s.name}**\n投稿先: <#${s.channelId}>\nRSS: ${s.feedUrl}`);
         const pages=splitDiscordBlocks(`📰 **NEWS ALERTS**\n自動通知: **${g.newsAutoEnabled?'ON':'OFF'}**\n登録: **${g.newsSources.length}件**`,lines,1900);
-        await interaction.reply({content:pages[0],ephemeral:true});for(const p of pages.slice(1))await interaction.followUp({content:p,ephemeral:true});return;
+        await safeReply(interaction, {content:pages[0],ephemeral:true});for(const p of pages.slice(1))await interaction.followUp({content:p,ephemeral:true});return;
       }
       if (n === 'news-auto') {
         const g=guildData(store,interaction.guildId),enabled=interaction.options.getBoolean('enabled',true);
-        if(enabled&&!g.newsSources.length)return interaction.reply({content:'❌ 先にNEWSソースを登録してください。',ephemeral:true});
-        g.newsAutoEnabled=enabled;saveStore(store);return interaction.reply({content:`📰 NEWS自動通知: **${enabled?'ON':'OFF'}**`,ephemeral:true});
+        if(enabled&&!g.newsSources.length)return safeReply(interaction, {content:'❌ 先にNEWSソースを登録してください。',ephemeral:true});
+        g.newsAutoEnabled=enabled;saveStore(store);return safeReply(interaction, {content:`📰 NEWS自動通知: **${enabled?'ON':'OFF'}**`,ephemeral:true});
       }
       if (n === 'news-test') {
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true),source=g.newsSources.find(x=>x.id===id);
-        if(!source)return interaction.reply({content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
-        await interaction.deferReply({ephemeral:true});
+        if(!source)return safeReply(interaction, {content:'❌ NEWSソースIDが見つかりません。',ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         try{
           const feed=await fetchNewsFeed(source),item=feed.items?.[0];if(!item)return interaction.editReply('❌ 記事がありません。');
           const ch=interaction.guild.channels.cache.get(source.channelId)||await interaction.guild.channels.fetch(source.channelId).catch(()=>null);
@@ -2264,13 +2345,13 @@ client.on(Events.InteractionCreate, async interaction => {
         }
 
         if(!regions.length){
-          return interaction.reply({
+          return safeReply(interaction, {
             content:'ℹ️ このサーバーでは天気地域がまだ登録されていません。サーバー管理者が `/weather-register` で登録してください。',
             ephemeral:true
           });
         }
 
-        await interaction.deferReply();
+        await safeDeferReply(interaction, );
         const pages=await buildWeatherPages(regions);
         return replyWeatherPages(interaction,pages);
       }
@@ -2285,23 +2366,23 @@ client.on(Events.InteractionCreate, async interaction => {
           g.weatherChannelRoutes={};
           g.lastWeatherPostDate=null;
           saveStore(store);
-          return interaction.reply({content:'✅ 天気地域をすべて削除しました。',ephemeral:true});
+          return safeReply(interaction, {content:'✅ 天気地域をすべて削除しました。',ephemeral:true});
         }
 
         if(!selected){
-          return interaction.reply({content:'❌ 追加または削除する地域を指定してください。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 追加または削除する地域を指定してください。',ephemeral:true});
         }
 
         const expanded=expandWeatherRegion(selected);
         if(!expanded.length){
-          return interaction.reply({content:'❌ 地域が見つかりません。都道府県名・地方名・全国47都道府県から選択してください。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 地域が見つかりません。都道府県名・地方名・全国47都道府県から選択してください。',ephemeral:true});
         }
 
         if(action==='add'){
           g.weatherRegions=[...new Set([...(g.weatherRegions || []),...expanded])];
           g.lastWeatherPostDate=null;
           saveStore(store);
-          return interaction.reply({
+          return safeReply(interaction, {
             content:`✅ **${selected}** を追加しました。${expanded.length > 1 ? `（${expanded.length}都道府県）` : ''}\n現在の登録数: **${g.weatherRegions.length}都道府県**`,
             ephemeral:true
           });
@@ -2314,7 +2395,7 @@ client.on(Events.InteractionCreate, async interaction => {
           for(const pref of expanded)delete g.weatherChannelRoutes[pref];
           g.lastWeatherPostDate=null;
           saveStore(store);
-          return interaction.reply({
+          return safeReply(interaction, {
             content:`✅ **${selected}** を削除しました。\n現在の登録数: **${g.weatherRegions.length}都道府県**`,
             ephemeral:true
           });
@@ -2345,7 +2426,7 @@ client.on(Events.InteractionCreate, async interaction => {
           + `共通投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'⚠️ 未設定'}`
           + (!allRegistered.length?`\n\n⚠️ 地域が未登録です。`:'');
         const pages=splitDiscordBlocks(header,areaLines,1900);
-        await interaction.reply({content:pages[0],ephemeral:true});
+        await safeReply(interaction, {content:pages[0],ephemeral:true});
         for(const page of pages.slice(1))await interaction.followUp({content:page,ephemeral:true});
         return;
       }
@@ -2356,7 +2437,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const channel=interaction.options.getChannel('channel',true);
         const expanded=expandWeatherRegion(selected);
         if(!expanded.length){
-          return interaction.reply({content:'❌ 地域が見つかりません。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 地域が見つかりません。',ephemeral:true});
         }
 
         g.weatherChannelRoutes ??= {};
@@ -2367,7 +2448,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         saveStore(store);
 
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ **${selected}** の天気投稿先を ${channel} に設定しました。\n`
             + `${expanded.length>1?`対象 ${expanded.length}都道府県: `:''}${expanded.join('、')}`,
           ephemeral:true
@@ -2379,12 +2460,12 @@ client.on(Events.InteractionCreate, async interaction => {
         const selected=interaction.options.getString('region',true);
         const expanded=expandWeatherRegion(selected);
         if(!expanded.length){
-          return interaction.reply({content:'❌ 地域が見つかりません。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 地域が見つかりません。',ephemeral:true});
         }
         g.weatherChannelRoutes ??= {};
         for(const pref of expanded)delete g.weatherChannelRoutes[pref];
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ **${selected}** の個別投稿先設定を解除しました。\n`
             + `以後はサーバー共通投稿先 ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'（未設定）'} を使用します。`,
           ephemeral:true
@@ -2407,7 +2488,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const allRegistered=[...registered].filter(p=>PREFECTURES.some(([name])=>name===p));
         const header=`🔒 **天気地域 管理者ページ**\n自動投稿: ${g.weatherAutoEnabled?'ON':'OFF'}\n投稿時刻: ${g.weatherAutoTime||'07:00'}（日本時間）\n共通投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定'}\n合計登録: **${allRegistered.length} / 47都道府県**`;
         const pages=splitDiscordBlocks(header,areaLines,1900);
-        await interaction.reply({content:pages[0],ephemeral:true});
+        await safeReply(interaction, {content:pages[0],ephemeral:true});
         for(const page of pages.slice(1)) await interaction.followUp({content:page,ephemeral:true});
         return;
       }
@@ -2416,23 +2497,23 @@ client.on(Events.InteractionCreate, async interaction => {
         const g=guildData(store,interaction.guildId);
         const region=interaction.options.getString('region',true).trim();
         const regions=expandWeatherRegion(region);
-        if(!regions.length)return interaction.reply({content:'❌ 地域名が正しくありません。',ephemeral:true});
+        if(!regions.length)return safeReply(interaction, {content:'❌ 地域名が正しくありません。',ephemeral:true});
         const time=interaction.options.getString('time',true).trim();
-        if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))return interaction.reply({content:'❌ 時刻は HH:MM で指定してください。',ephemeral:true});
+        if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))return safeReply(interaction, {content:'❌ 時刻は HH:MM で指定してください。',ephemeral:true});
         g.weatherJobs??=[];
         const id=Math.max(0,...g.weatherJobs.map(x=>x.id))+1;
         const channelId=interaction.options.getChannel('channel',true).id;
         g.weatherJobs.push({id,regions,channelId,time,lastSent:null});saveStore(store);
-        return interaction.reply({content:`✅ 天気設定 #${id} を追加: ${region} / <#${channelId}> / ${time} JST`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 天気設定 #${id} を追加: ${region} / <#${channelId}> / ${time} JST`,ephemeral:true});
       }
       if(n==='weather-auto-list'){
         const jobs=guildData(store,interaction.guildId).weatherJobs||[];
-        return interaction.reply({content:jobs.length?jobs.map(j=>`#${j.id} ${j.regions.join('、')} → <#${j.channelId}> ${j.time} JST`).join('\n').slice(0,1900):'登録なし',ephemeral:true});
+        return safeReply(interaction, {content:jobs.length?jobs.map(j=>`#${j.id} ${j.regions.join('、')} → <#${j.channelId}> ${j.time} JST`).join('\n').slice(0,1900):'登録なし',ephemeral:true});
       }
       if(n==='weather-auto-remove'){
         const g=guildData(store,interaction.guildId),id=interaction.options.getInteger('id',true);
         const before=(g.weatherJobs||[]).length;g.weatherJobs=(g.weatherJobs||[]).filter(j=>j.id!==id);saveStore(store);
-        return interaction.reply({content:before===g.weatherJobs.length?'❌ 設定IDが見つかりません。':`✅ 設定 #${id} を削除しました。`,ephemeral:true});
+        return safeReply(interaction, {content:before===g.weatherJobs.length?'❌ 設定IDが見つかりません。':`✅ 設定 #${id} を削除しました。`,ephemeral:true});
       }
       if (n === 'weather-auto') {
         const g=guildData(store,interaction.guildId);
@@ -2440,51 +2521,51 @@ client.on(Events.InteractionCreate, async interaction => {
         if(sub==='add'){
           const region=interaction.options.getString('region',true).trim();
           const regions=expandWeatherRegion(region);
-          if(!regions.length)return interaction.reply({content:'❌ 地域名が正しくありません。',ephemeral:true});
+          if(!regions.length)return safeReply(interaction, {content:'❌ 地域名が正しくありません。',ephemeral:true});
           const time=interaction.options.getString('time',true).trim();
-          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))return interaction.reply({content:'❌ 時刻は HH:MM で指定してください。',ephemeral:true});
+          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time))return safeReply(interaction, {content:'❌ 時刻は HH:MM で指定してください。',ephemeral:true});
           g.weatherJobs??=[];
           const id=Math.max(0,...g.weatherJobs.map(x=>x.id||0))+1;
           const channelId=interaction.options.getChannel('channel',true).id;
           g.weatherJobs.push({id,regions,channelId,time,lastSent:null}); saveStore(store);
-          return interaction.reply({content:`✅ 天気設定 #${id} を追加しました。\n地域: **${region}**\n投稿先: <#${channelId}>\n時刻: **${time} JST**`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ 天気設定 #${id} を追加しました。\n地域: **${region}**\n投稿先: <#${channelId}>\n時刻: **${time} JST**`,ephemeral:true});
         }
         if(sub==='list'){
           const jobs=g.weatherJobs||[];
-          return interaction.reply({content:jobs.length?`🌤️ **天気 自動投稿設定（${jobs.length}件）**\n`+jobs.map(j=>`#${j.id} ${j.regions.join('、')} → <#${j.channelId}> / ${j.time} JST`).join('\n').slice(0,1850):'登録なし',ephemeral:true});
+          return safeReply(interaction, {content:jobs.length?`🌤️ **天気 自動投稿設定（${jobs.length}件）**\n`+jobs.map(j=>`#${j.id} ${j.regions.join('、')} → <#${j.channelId}> / ${j.time} JST`).join('\n').slice(0,1850):'登録なし',ephemeral:true});
         }
         if(sub==='remove'){
           const id=interaction.options.getInteger('id',true),before=(g.weatherJobs||[]).length;
           g.weatherJobs=(g.weatherJobs||[]).filter(j=>j.id!==id); saveStore(store);
-          return interaction.reply({content:before===g.weatherJobs.length?'❌ 設定IDが見つかりません。':`✅ 天気設定 #${id} を削除しました。`,ephemeral:true});
+          return safeReply(interaction, {content:before===g.weatherJobs.length?'❌ 設定IDが見つかりません。':`✅ 天気設定 #${id} を削除しました。`,ephemeral:true});
         }
         const enabled=interaction.options.getBoolean('enabled',true);
         const raw=interaction.options.getString('time');
         const channel=interaction.options.getChannel('channel');
         if(raw){
           const value=raw.trim();
-          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))return interaction.reply({content:'❌ 時刻は `07:00` や `18:30` のように24時間表記で入力してください。',ephemeral:true});
+          if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))return safeReply(interaction, {content:'❌ 時刻は `07:00` や `18:30` のように24時間表記で入力してください。',ephemeral:true});
           g.weatherAutoTime=value; g.lastWeatherPostDate=null;
         }
         if(channel)g.weatherChannelId=channel.id;
         const registeredForAuto=g.weatherRegions||[];
         const missingRoute=registeredForAuto.filter(pref=>!(g.weatherChannelRoutes||{})[pref] && !g.weatherChannelId);
-        if(enabled && missingRoute.length)return interaction.reply({content:`❌ 投稿先が未設定の地域があります: ${missingRoute.join('、')}`,ephemeral:true});
-        if(enabled && !registeredForAuto.length)return interaction.reply({content:'❌ 自動投稿をONにする前に天気地域を1つ以上登録してください。',ephemeral:true});
+        if(enabled && missingRoute.length)return safeReply(interaction, {content:`❌ 投稿先が未設定の地域があります: ${missingRoute.join('、')}`,ephemeral:true});
+        if(enabled && !registeredForAuto.length)return safeReply(interaction, {content:'❌ 自動投稿をONにする前に天気地域を1つ以上登録してください。',ephemeral:true});
         g.weatherAutoEnabled=enabled; saveStore(store);
-        return interaction.reply({content:`✅ 共通天気自動投稿: **${enabled?'ON':'OFF'}**\n時刻: **${g.weatherAutoTime||'07:00'} JST**\n投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定'}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 共通天気自動投稿: **${enabled?'ON':'OFF'}**\n時刻: **${g.weatherAutoTime||'07:00'} JST**\n投稿先: ${g.weatherChannelId?`<#${g.weatherChannelId}>`:'未設定'}`,ephemeral:true});
       }
 
       if (n === 'earthquake') {
-        await interaction.deferReply();return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
+        await safeDeferReply(interaction, );return interaction.editReply(earthquakeText(await fetchLatestEarthquake()));
       }
       if (n === 'earthquake-register') {
         const g=guildData(store,interaction.guildId),r=interaction.options.getString('region',true),min=interaction.options.getInteger('min_intensity');
         if(!g.earthquakeRegions.includes(r))g.earthquakeRegions.push(r);if(min)g.minIntensity=min;saveStore(store);
-        return interaction.reply({content:`✅ 地震地域: ${g.earthquakeRegions.join(' / ')} / 最低震度 ${g.minIntensity}`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 地震地域: ${g.earthquakeRegions.join(' / ')} / 最低震度 ${g.minIntensity}`,ephemeral:true});
       }
       if (n === 'earthquake-list') {
-        const g=guildData(store,interaction.guildId);return interaction.reply({content:`地域: ${g.earthquakeRegions.join(' / ')||'全国（地域未設定のため）'} / 最低震度 ${g.minIntensity}`,ephemeral:true});
+        const g=guildData(store,interaction.guildId);return safeReply(interaction, {content:`地域: ${g.earthquakeRegions.join(' / ')||'全国（地域未設定のため）'} / 最低震度 ${g.minIntensity}`,ephemeral:true});
       }
       if (n === 'earthquake-auto') {
         const g=guildData(store,interaction.guildId);
@@ -2492,11 +2573,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const channel=interaction.options.getChannel('channel');
         if(channel)g.earthquakeChannelId=channel.id;
         if(enabled && !g.earthquakeChannelId){
-          return interaction.reply({content:'❌ 地震速報の投稿先が未設定です。`/earthquake-auto enabled:True channel:#地震速報` のように投稿先も指定してください。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 地震速報の投稿先が未設定です。`/earthquake-auto enabled:True channel:#地震速報` のように投稿先も指定してください。',ephemeral:true});
         }
         g.earthquakeAutoEnabled=enabled;
         saveStore(store);
-        return interaction.reply({
+        return safeReply(interaction, {
           content:`✅ 自動地震速報: **${g.earthquakeAutoEnabled?'ON':'OFF'}**\n投稿先: ${g.earthquakeChannelId?`<#${g.earthquakeChannelId}>`:'未設定'}\n対象: ${g.earthquakeRegions.length?g.earthquakeRegions.join(' / '):'全国（地域未設定）'}\n最低震度: **${g.minIntensity||3}**\n⚡ 新着地震を約${config.earthquakePollSeconds}秒間隔で監視します。`,
           ephemeral:true
         });
@@ -2505,34 +2586,34 @@ client.on(Events.InteractionCreate, async interaction => {
       if (n === 'schedule-post') {
         const ch=interaction.options.getChannel('channel',true),raw=interaction.options.getString('datetime',true),message=interaction.options.getString('message',true),del=interaction.options.getInteger('delete_after_minutes');
         const when=new Date(raw.replace(' ','T')+':00+09:00');
-        if(Number.isNaN(when.getTime()))return interaction.reply({content:'❌ 日時は 2026-09-15 20:00 の形式にしてください。',ephemeral:true});
+        if(Number.isNaN(when.getTime()))return safeReply(interaction, {content:'❌ 日時は 2026-09-15 20:00 の形式にしてください。',ephemeral:true});
         const id=store.nextScheduleId++;store.schedules.push({id,guildId:interaction.guildId,channelId:ch.id,message,at:when.toISOString(),deleteAfterMinutes:del,done:false});saveStore(store);
-        return interaction.reply({content:`✅ 予約 #${id} を登録しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ 予約 #${id} を登録しました。`,ephemeral:true});
       }
       if (n === 'schedule-list') {
-        const a=store.schedules.filter(x=>x.guildId===interaction.guildId&&!x.done);return interaction.reply({content:a.length?a.map(x=>`#${x.id} ${x.at} → <#${x.channelId}>`).join('\n'):'予約はありません。',ephemeral:true});
+        const a=store.schedules.filter(x=>x.guildId===interaction.guildId&&!x.done);return safeReply(interaction, {content:a.length?a.map(x=>`#${x.id} ${x.at} → <#${x.channelId}>`).join('\n'):'予約はありません。',ephemeral:true});
       }
       if (n === 'schedule-cancel') {
         const id=interaction.options.getInteger('id',true),before=store.schedules.length;store.schedules=store.schedules.filter(x=>!(x.guildId===interaction.guildId&&x.id===id));saveStore(store);
-        return interaction.reply({content:before!==store.schedules.length?`✅ 予約 #${id} を削除しました。`:'該当予約がありません。',ephemeral:true});
+        return safeReply(interaction, {content:before!==store.schedules.length?`✅ 予約 #${id} を削除しました。`:'該当予約がありません。',ephemeral:true});
       }
 
       if (n === 'moderation-rule') {
         const id=store.nextRuleId++;store.moderationRules.push({id,guildId:interaction.guildId,keyword:interaction.options.getString('keyword',true),action:interaction.options.getString('action',true)});saveStore(store);
-        return interaction.reply({content:`✅ ルール #${id} を追加しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ ルール #${id} を追加しました。`,ephemeral:true});
       }
       if (n === 'moderation-list') {
-        const a=store.moderationRules.filter(x=>x.guildId===interaction.guildId);return interaction.reply({content:a.length?a.map(x=>`#${x.id} "${x.keyword}" → ${x.action}`).join('\n'):'ルールなし',ephemeral:true});
+        const a=store.moderationRules.filter(x=>x.guildId===interaction.guildId);return safeReply(interaction, {content:a.length?a.map(x=>`#${x.id} "${x.keyword}" → ${x.action}`).join('\n'):'ルールなし',ephemeral:true});
       }
       if (n === 'moderation-remove') {
         const id=interaction.options.getInteger('id',true),before=store.moderationRules.length;store.moderationRules=store.moderationRules.filter(x=>!(x.guildId===interaction.guildId&&x.id===id));saveStore(store);
-        return interaction.reply({content:before!==store.moderationRules.length?`✅ #${id} 削除完了`:'該当なし',ephemeral:true});
+        return safeReply(interaction, {content:before!==store.moderationRules.length?`✅ #${id} 削除完了`:'該当なし',ephemeral:true});
       }
 
       if (n === 'play') {
         // InteractionCreate直後ですでにdeferReply済み。ここでは二重ACKしない。
         if(!interaction.deferred&&!interaction.replied){
-          try{ await interaction.deferReply(); }catch(e){ if(e?.code===10062)return; throw e; }
+          try{ await safeDeferReply(interaction, ); }catch(e){ if(e?.code===10062)return; throw e; }
         }
         const input=interaction.options.getString('query',true);const vc=interaction.member?.voice?.channel;
         if(!vc)return interaction.editReply('❌ 先にボイスチャンネルへ参加してください。');
@@ -2549,18 +2630,18 @@ client.on(Events.InteractionCreate, async interaction => {
           if(!sess.playing)playNext(sess.key).catch(console.error);
         }catch(e){await interaction.editReply(`❌ 再生準備に失敗しました。\n${String(e.message||e).slice(0,1000)}`);}return;
       }
-      if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return interaction.reply(lines.join('\n')||'このVCのキューは空です。');}
-      if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return interaction.reply('⏭️ スキップしました。');}
-      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return interaction.reply('⏹️ このVCの再生を停止しました。');}
-      if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return interaction.reply('⏸️ 一時停止しました。');}
-      if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return interaction.reply('▶️ 再開しました。');}
-      if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return interaction.reply(s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
-      if (n === 'volume') {const s=sessionForInteraction(interaction);if(!s)return interaction.reply({content:'このVCでは再生していません。',ephemeral:true});const v=interaction.options.getInteger('percent',true);s.volume=v;s.player.state.resource?.volume?.setVolume(v/100);return interaction.reply(`🔊 音量を ${v}% に変更しました。`);}
+      if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return safeReply(interaction, lines.join('\n')||'このVCのキューは空です。');}
+      if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return safeReply(interaction, '⏭️ スキップしました。');}
+      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return safeReply(interaction, '⏹️ このVCの再生を停止しました。');}
+      if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return safeReply(interaction, '⏸️ 一時停止しました。');}
+      if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return safeReply(interaction, '▶️ 再開しました。');}
+      if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return safeReply(interaction, s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
+      if (n === 'volume') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});const v=interaction.options.getInteger('percent',true);s.volume=v;s.player.state.resource?.volume?.setVolume(v/100);return safeReply(interaction, `🔊 音量を ${v}% に変更しました。`);}
       if (n === 'music-stats') {
         const st=musicStats(interaction.guildId),type=interaction.options.getString('type')||'all';const parts=[];
         if(type==='all'||type==='users'){const users=Object.entries(st.users||{}).sort((a,b)=>(b[1].seconds||0)-(a[1].seconds||0)).slice(0,10);parts.push(`👥 **よく聴いているユーザー**\n${users.length?users.map(([id,u],i)=>`${i+1}. <@${id}> — ${fmtDuration(u.seconds)}`).join('\n'):'まだ統計がありません。'}`);}
         if(type==='all'||type==='tracks'){const tracks=Object.values(st.tracks||{}).sort((a,b)=>(b.plays||0)-(a.plays||0)).slice(0,10);parts.push(`🎶 **人気曲**\n${tracks.length?tracks.map((t,i)=>`${i+1}. ${t.title} — ${t.plays}回`).join('\n'):'まだ統計がありません。'}`);}
-        return interaction.reply({embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
+        return safeReply(interaction, {embeds:[new EmbedBuilder().setTitle('📊 Music Statistics').setDescription(parts.join('\n\n')).setFooter({text:`総再生開始回数: ${st.totalPlays||0}`})]});
       }
       if (n === 'image') {
         const sub=interaction.options.getSubcommand(true);
@@ -2582,7 +2663,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
         if (sub === 'video-compress') {
           const att=interaction.options.getAttachment('video',true);
-          await interaction.deferReply({ephemeral:true});
+          await safeDeferReply(interaction, {ephemeral:true});
           const dir=await makeTempImageDir();
           try{
             const b=await fetchVideoAttachment(att,100);
@@ -2609,11 +2690,11 @@ client.on(Events.InteractionCreate, async interaction => {
       if (n === 'download') {
         const url=interaction.options.getString('url',true);
         const format=interaction.options.getString('format',true);
-        if(format==='link') return interaction.reply(`🎬 ${url}`);
+        if(format==='link') return safeReply(interaction, `🎬 ${url}`);
         if(!supportedDownloadUrl(url)){
-          return interaction.reply({content:'❌ 対応URLは YouTube / X / TikTok / Instagram の投稿URLです。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 対応URLは YouTube / X / TikTok / Instagram の投稿URLです。',ephemeral:true});
         }
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         let result=null;
         try{
           result=await downloadSocialMedia(url,format);
@@ -2641,93 +2722,93 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       const shops=Object.values(store.shops).filter(x=>x.guildId===interaction.guildId&&x.active!==false);
       if(action==='settings'||action==='delete'||action==='displayselect'){
-        if(!shops.length)return interaction.reply({content:'自動販売機がありません。',ephemeral:true});
+        if(!shops.length)return safeReply(interaction, {content:'自動販売機がありません。',ephemeral:true});
         const select=new StringSelectMenuBuilder().setCustomId(`shopuiSelect:${action}`).setPlaceholder(action==='settings'?'設定する自販機を選択してください':action==='delete'?'削除する自販機を選択してください':'表示する自販機を選択してください').addOptions(shops.slice(0,25).map(x=>({label:x.name.slice(0,100),description:`自販機 #${x.id}`,value:String(x.id)})));
-        return interaction.reply({content:'対象を選択してください：',components:[new ActionRowBuilder().addComponents(select)],ephemeral:true});
+        return safeReply(interaction, {content:'対象を選択してください：',components:[new ActionRowBuilder().addComponents(select)],ephemeral:true});
       }
       const shop=store.shops[shopId];
-      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return interaction.reply({content:'❌ 自販機が見つからないか、管理権限がありません。',ephemeral:true});
+      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 自販機が見つからないか、管理権限がありません。',ephemeral:true});
       if(action==='display'){
         const picker=new ChannelSelectMenuBuilder().setCustomId(`shopuiChannel:display:${shop.id}`).setPlaceholder('自販機を表示するチャンネル').addChannelTypes(ChannelType.GuildText);
-        return interaction.reply({content:`**${shop.name}** の表示先を選択してください。`,components:[new ActionRowBuilder().addComponents(picker)],ephemeral:true});
+        return safeReply(interaction, {content:`**${shop.name}** の表示先を選択してください。`,components:[new ActionRowBuilder().addComponents(picker)],ephemeral:true});
       }
       if(action==='orderchannel'||action==='saleschannel'){
         const picker=new ChannelSelectMenuBuilder().setCustomId(`shopuiChannel:${action}:${shop.id}`).setPlaceholder('チャンネルを選択').addChannelTypes(ChannelType.GuildText);
-        return interaction.reply({content:'設定するチャンネルを選択してください。',components:[new ActionRowBuilder().addComponents(picker)],ephemeral:true});
+        return safeReply(interaction, {content:'設定するチャンネルを選択してください。',components:[new ActionRowBuilder().addComponents(picker)],ephemeral:true});
       }
-      if(action==='salestoggle'){shop.showSalesCount=!shop.showSalesCount;saveStore(store);return interaction.update({embeds:[shopManageEmbed(shop)],components:shopManageRows(shop)});}
+      if(action==='salestoggle'){shop.showSalesCount=!shop.showSalesCount;saveStore(store);return safeUpdate(interaction, {embeds:[shopManageEmbed(shop)],components:shopManageRows(shop)});}
       if(action==='stock'||action==='products'){
         const ps=shop.products||[];const lines=ps.map(p=>`${p.active===false?'🛑':'✅'} **${p.name}** / ID:\`${p.id}\` / ¥${Number(p.price).toLocaleString()}${p.pointPrice?` / ${Number(p.pointPrice).toLocaleString()}pt`:''} / 在庫:${p.stock<0?'∞':p.stock}`);
-        return interaction.reply({content:lines.join('\n')||'商品はありません。',ephemeral:true});
+        return safeReply(interaction, {content:lines.join('\n')||'商品はありません。',ephemeral:true});
       }
       if(action==='stats'){
         const os=Object.values(store.orders||{}).filter(o=>Number(o.shopId)===Number(shop.id));const completed=os.filter(o=>o.status==='completed');const total=completed.reduce((a,o)=>a+Number(o.total||0),0);
-        return interaction.reply({content:`📊 **${shop.name} 統計**\n注文: **${os.length}件**\n完了: **${completed.length}件**\n完了売上: **¥${total.toLocaleString()}**`,ephemeral:true});
+        return safeReply(interaction, {content:`📊 **${shop.name} 統計**\n注文: **${os.length}件**\n完了: **${completed.length}件**\n完了売上: **¥${total.toLocaleString()}**`,ephemeral:true});
       }
-      if(action==='productadd')return interaction.reply({content:`商品追加は \`/product-add shop_id:${shop.id}\` から登録できます。ZIP・URL・画像・購入後ロール等も設定できます。`,ephemeral:true});
+      if(action==='productadd')return safeReply(interaction, {content:`商品追加は \`/product-add shop_id:${shop.id}\` から登録できます。ZIP・URL・画像・購入後ロール等も設定できます。`,ephemeral:true});
     }
     if(interaction.isStringSelectMenu() && interaction.customId.startsWith('shopuiSelect:')){
       const action=interaction.customId.split(':')[1],shop=store.shops[interaction.values[0]];
-      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return interaction.update({content:'❌ 自販機が見つからないか、管理権限がありません。',components:[]});
-      if(action==='settings')return interaction.update({content:'',embeds:[shopManageEmbed(shop)],components:shopManageRows(shop)});
+      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return safeUpdate(interaction, {content:'❌ 自販機が見つからないか、管理権限がありません。',components:[]});
+      if(action==='settings')return safeUpdate(interaction, {content:'',embeds:[shopManageEmbed(shop)],components:shopManageRows(shop)});
       if(action==='displayselect'){
         const picker=new ChannelSelectMenuBuilder().setCustomId(`shopuiChannel:display:${shop.id}`).setPlaceholder('自販機を表示するチャンネル').addChannelTypes(ChannelType.GuildText);
-        return interaction.update({content:`**${shop.name}** の表示先を選択してください。`,embeds:[],components:[new ActionRowBuilder().addComponents(picker)]});
+        return safeUpdate(interaction, {content:`**${shop.name}** の表示先を選択してください。`,embeds:[],components:[new ActionRowBuilder().addComponents(picker)]});
       }
-      if(action==='delete'){shop.active=false;saveStore(store);return interaction.update({content:`🛑 自販機 #${shop.id}「${shop.name}」を停止しました。`,components:[]});}
+      if(action==='delete'){shop.active=false;saveStore(store);return safeUpdate(interaction, {content:`🛑 自販機 #${shop.id}「${shop.name}」を停止しました。`,components:[]});}
     }
     if(interaction.isChannelSelectMenu() && interaction.customId.startsWith('shopuiChannel:')){
       const [,action,shopId]=interaction.customId.split(':'),shop=store.shops[shopId];
-      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return interaction.update({content:'❌ 自販機が見つからないか、管理権限がありません。',components:[]});
+      if(!shop||shop.guildId!==interaction.guildId||!isShopManager(interaction,shop))return safeUpdate(interaction, {content:'❌ 自販機が見つからないか、管理権限がありません。',components:[]});
       const channelId=interaction.values[0],ch=await interaction.guild.channels.fetch(channelId).catch(()=>null);
-      if(!ch?.isTextBased())return interaction.update({content:'❌ テキストチャンネルを選択してください。',components:[]});
+      if(!ch?.isTextBased())return safeUpdate(interaction, {content:'❌ テキストチャンネルを選択してください。',components:[]});
       if(action==='display'){
-        const panel=buildShopSalesPanel(shop);if(!panel)return interaction.update({content:'❌ 販売可能な商品がありません。先に商品を追加してください。',components:[]});
+        const panel=buildShopSalesPanel(shop);if(!panel)return safeUpdate(interaction, {content:'❌ 販売可能な商品がありません。先に商品を追加してください。',components:[]});
         const msg=await ch.send(panel);shop.panelChannelId=ch.id;shop.panelMessageId=msg.id;saveStore(store);
-        return interaction.update({content:`✅ **${shop.name}** を ${ch} に表示しました。`,components:[]});
+        return safeUpdate(interaction, {content:`✅ **${shop.name}** を ${ch} に表示しました。`,components:[]});
       }
       if(action==='orderchannel')shop.orderChannelId=ch.id;
       if(action==='saleschannel')shop.salesChannelId=ch.id;
-      saveStore(store);return interaction.update({content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
+      saveStore(store);return safeUpdate(interaction, {content:`✅ **${shop.name}** のチャンネル設定を ${ch} に変更しました。`,components:[]});
     }
 
     if (interaction.isButton() && /^(help_first|help_prev|help_next|help_last):/.test(interaction.customId)) {
       // Discordの3秒制限内に即時更新。重い処理は行わない。
       const requested=Number(interaction.customId.split(':')[1] || 0);
       const page=buildHelpPage(requested);
-      if(!page)return interaction.update({content:'現在表示できるコマンドがありません。',embeds:[],components:[]});
-      return interaction.update({embeds:[page.embed],components:[page.navRow]});
+      if(!page)return safeUpdate(interaction, {content:'現在表示できるコマンドがありません。',embeds:[],components:[]});
+      return safeUpdate(interaction, {embeds:[page.embed],components:[page.navRow]});
     }
-    if (interaction.isButton() && interaction.customId==='support_help') return interaction.reply({content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
+    if (interaction.isButton() && interaction.customId==='support_help') return safeReply(interaction, {content:'🆘 サポートサーバー: https://discord.gg/KGhYc6cWmq',ephemeral:true});
     if (interaction.isStringSelectMenu() && interaction.customId==='rolecolor') {
-      if(!hasConfiguredAdminRole(interaction))return interaction.reply({content:'❌ 管理者ロールが必要です。',ephemeral:true});
+      if(!hasConfiguredAdminRole(interaction))return safeReply(interaction, {content:'❌ 管理者ロールが必要です。',ephemeral:true});
       const key=`${interaction.guildId}:${interaction.user.id}`,pending=pendingRoleCreates.get(key);
-      if(!pending||Date.now()-pending.at>10*60*1000)return interaction.reply({content:'❌ 作成情報の期限が切れました。もう一度 `/role-create` を実行してください。',ephemeral:true});
+      if(!pending||Date.now()-pending.at>10*60*1000)return safeReply(interaction, {content:'❌ 作成情報の期限が切れました。もう一度 `/role-create` を実行してください。',ephemeral:true});
       try{
         const role=await interaction.guild.roles.create({name:pending.name,color:interaction.values[0],permissions:pending.permissions,mentionable:pending.mentionable,hoist:pending.hoist,reason:`${interaction.user.tag} /role-create`});
         pendingRoleCreates.delete(key);
-        return interaction.update({content:`✅ ロール ${role} を作成しました。\n色: **${interaction.values[0]}**`,components:[]});
-      }catch(e){console.error('role create',e);return interaction.update({content:`❌ ロール作成に失敗しました。BOTの「ロールの管理」権限を確認してください。\n${String(e.message||e).slice(0,500)}`,components:[]});}
+        return safeUpdate(interaction, {content:`✅ ロール ${role} を作成しました。\n色: **${interaction.values[0]}**`,components:[]});
+      }catch(e){console.error('role create',e);return safeUpdate(interaction, {content:`❌ ロール作成に失敗しました。BOTの「ロールの管理」権限を確認してください。\n${String(e.message||e).slice(0,500)}`,components:[]});}
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('rolepage:')) {
       const roleId=interaction.values[0];
       const role=await interaction.guild.roles.fetch(roleId).catch(()=>null);
-      if(!role)return interaction.reply({content:'❌ ロールが見つかりません。',ephemeral:true});
+      if(!role)return safeReply(interaction, {content:'❌ ロールが見つかりません。',ephemeral:true});
       const problem=rolePanelProblem(interaction.guild,role);
-      if(problem)return interaction.reply({content:`❌ ${problem}`,ephemeral:true});
+      if(problem)return safeReply(interaction, {content:`❌ ${problem}`,ephemeral:true});
       const member=await interaction.guild.members.fetch(interaction.user.id).catch(()=>null);
-      if(!member)return interaction.reply({content:'❌ メンバー情報を取得できません。',ephemeral:true});
+      if(!member)return safeReply(interaction, {content:'❌ メンバー情報を取得できません。',ephemeral:true});
       try{
         if(member.roles.cache.has(role.id)){
           await member.roles.remove(role,'ロールパネルから解除');
-          return interaction.reply({content:`✅ **${role.name}** を外しました。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ **${role.name}** を外しました。`,ephemeral:true});
         }
         await member.roles.add(role,'ロールパネルから付与');
-        return interaction.reply({content:`✅ **${role.name}** を付与しました。`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ **${role.name}** を付与しました。`,ephemeral:true});
       }catch(e){
         console.error('role select panel error',e);
-        return interaction.reply({content:'❌ ロールを変更できません。BOTの「ロールの管理」権限とロール順序を確認してください。',ephemeral:true});
+        return safeReply(interaction, {content:'❌ ロールを変更できません。BOTの「ロールの管理」権限とロール順序を確認してください。',ephemeral:true});
       }
     }
 
@@ -2735,7 +2816,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const shopId=interaction.customId.split(':')[1];
       const productId=interaction.values[0];
       const shop=store.shops[shopId],p=shop?.products?.find(x=>x.id===productId);
-      if(!shop||!p||p.active===false||p.stock===0)return interaction.reply({content:'❌ この商品は現在購入できません。',ephemeral:true});
+      if(!shop||!p||p.active===false||p.stock===0)return safeReply(interaction, {content:'❌ この商品は現在購入できません。',ephemeral:true});
       const embed=new EmbedBuilder()
         .setTitle(`🛍️ ${p.name}`)
         .setDescription(p.description||'商品説明はありません。')
@@ -2749,7 +2830,7 @@ client.on(Events.InteractionCreate, async interaction => {
         new ButtonBuilder().setCustomId(`buy:${shop.id}:${p.id}`).setLabel('この商品を購入').setStyle(ButtonStyle.Success),
         ...(p.pointPrice?[new ButtonBuilder().setCustomId(`pointbuy:${shop.id}:${p.id}`).setLabel(`${p.pointPrice.toLocaleString()}ptで購入`).setStyle(ButtonStyle.Primary)]:[])
       );
-      return interaction.reply({embeds:[embed],components:[row],ephemeral:true});
+      return safeReply(interaction, {embeds:[embed],components:[row],ephemeral:true});
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('ttt:')){
@@ -2793,13 +2874,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if(interaction.isButton() && interaction.customId.startsWith('rps:')){
       const [,id,userId,choice]=interaction.customId.split(':');
-      if(interaction.user.id!==userId)return interaction.reply({content:'❌ このじゃんけんはコマンドを実行した人専用です。',ephemeral:true});
+      if(interaction.user.id!==userId)return safeReply(interaction, {content:'❌ このじゃんけんはコマンドを実行した人専用です。',ephemeral:true});
       const choices=['rock','scissors','paper'];
       const bot=choices[Math.floor(Math.random()*choices.length)];
       const label={rock:'✊ グー',scissors:'✌️ チョキ',paper:'✋ パー'};
       const result=choice===bot?'🤝 あいこ':((choice==='rock'&&bot==='scissors')||(choice==='scissors'&&bot==='paper')||(choice==='paper'&&bot==='rock'))?'🎉 あなたの勝ち！':'🤖 BOTの勝ち！';
       const disabled=new ActionRowBuilder().addComponents(...choices.map(c=>new ButtonBuilder().setCustomId(`rps_done:${id}:${c}`).setLabel(label[c]).setStyle(c===choice?ButtonStyle.Success:ButtonStyle.Secondary).setDisabled(true)));
-      return interaction.update({content:`🎮 **じゃんけん**\nあなた: ${label[choice]}\nBOT: ${label[bot]}\n\n${result}`,components:[disabled]});
+      return safeUpdate(interaction, {content:`🎮 **じゃんけん**\nあなた: ${label[choice]}\nBOT: ${label[bot]}\n\n${result}`,components:[disabled]});
     }
 
     if (interaction.isButton()) {
@@ -2807,30 +2888,30 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (kind === 'verify' || kind === 'verifypanel' || kind === 'roleapprove') {
         const approvalOption=kind==='roleapprove' ? guildData(store,interaction.guildId).rolePanels?.[b]?.roleOptions?.find(x=>x.roleId===a && x.mode==='approval') : null;
-        if(kind==='roleapprove' && (!approvalOption || interaction.channelId!==b))return interaction.reply({content:'❌ この承認制ロールは現在のパネルで設定されていません。',ephemeral:true});
+        if(kind==='roleapprove' && (!approvalOption || interaction.channelId!==b))return safeReply(interaction, {content:'❌ この承認制ロールは現在のパネルで設定されていません。',ephemeral:true});
         const panel=kind==='verifypanel' ? guildData(store,interaction.guildId).verificationPanels?.[a] : null;
-        if(kind==='verifypanel' && !panel)return interaction.reply({content:'❌ 認証パネルの設定が見つかりません。',ephemeral:true});
+        if(kind==='verifypanel' && !panel)return safeReply(interaction, {content:'❌ 認証パネルの設定が見つかりません。',ephemeral:true});
         const requestedIds=panel?.roleIds || [a||guildData(store,interaction.guildId).verificationRoleId];
         const panelName=panel?.name||(kind==='roleapprove'?approvalOption.label:'認証');
         const panelReviewChannelId=panel?.approvalChannelId||(kind==='roleapprove'?approvalOption.approvalChannelId:b)||guildData(store,interaction.guildId).verificationReviewChannelId;
         const roles=[];
         for(const id of requestedIds){
           const role=id ? await interaction.guild.roles.fetch(id).catch(()=>null) : null;
-          if(!role)return interaction.reply({content:'❌ 認証ロールが見つかりません。管理者に確認してください。',ephemeral:true});
+          if(!role)return safeReply(interaction, {content:'❌ 認証ロールが見つかりません。管理者に確認してください。',ephemeral:true});
           const problem=rolePanelProblem(interaction.guild,role);
-          if(problem)return interaction.reply({content:`❌ ${role.name}: ${problem}`,ephemeral:true});
+          if(problem)return safeReply(interaction, {content:`❌ ${role.name}: ${problem}`,ephemeral:true});
           roles.push(role);
         }
         const member=await interaction.guild.members.fetch(interaction.user.id).catch(()=>null);
-        if(!member)return interaction.reply({content:'❌ メンバー情報を取得できませんでした。',ephemeral:true});
-        if(roles.every(role=>member.roles.cache.has(role.id)))return interaction.reply({content:'✅ 対象ロールはすべて付与済みです。',ephemeral:true});
+        if(!member)return safeReply(interaction, {content:'❌ メンバー情報を取得できませんでした。',ephemeral:true});
+        if(roles.every(role=>member.roles.cache.has(role.id)))return safeReply(interaction, {content:'✅ 対象ロールはすべて付与済みです。',ephemeral:true});
         const roleIds=roles.map(role=>role.id);
         const roleId=roleIds[0];
         const existing=Object.values(store.verificationRequests || {}).find(
           r=>r.guildId===interaction.guildId && r.userId===interaction.user.id && (r.panelId ? r.panelId===(kind==='roleapprove'?`role:${b}:${a}`:a) : r.roleId===roleId && kind==='verify') && r.status==='pending'
         );
         if(existing){
-          return interaction.reply({
+          return safeReply(interaction, {
             content:`⏳ すでに認証申請済みです。管理者の承認をお待ちください。（申請 #${existing.id}）`,
             ephemeral:true
           });
@@ -2902,7 +2983,7 @@ client.on(Events.InteractionCreate, async interaction => {
           }
         }
 
-        return interaction.reply({
+        return safeReply(interaction, {
           content:notifySent
             ? `✅ 認証申請を送信しました。（申請 #${id}）\n管理者へ通知しました。承認されると **${roles.map(r=>r.name).join('、')}** が付与されます。`
             : `✅ 認証申請を保存しました。（申請 #${id}）\n⚠️ 承認通知チャンネルへの通知に失敗しました。管理者は \`/verify-admin\` から確認できます。`,
@@ -2912,15 +2993,15 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (kind === 'verifyadmin') {
         if(!hasConfiguredAdminRole(interaction)){
-          return interaction.reply({content:'❌ 指定された管理者ロールが必要です。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 指定された管理者ロールが必要です。',ephemeral:true});
         }
 
         const req=store.verificationRequests?.[a];
         if(!req || req.guildId!==interaction.guildId){
-          return interaction.reply({content:'❌ 認証申請が見つかりません。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ 認証申請が見つかりません。',ephemeral:true});
         }
         if(req.status!=='pending'){
-          return interaction.reply({content:`ℹ️ この申請はすでに **${req.status==='approved'?'承認':'却下'}済み** です。`,ephemeral:true});
+          return safeReply(interaction, {content:`ℹ️ この申請はすでに **${req.status==='approved'?'承認':'却下'}済み** です。`,ephemeral:true});
         }
 
 
@@ -2929,18 +3010,18 @@ client.on(Events.InteractionCreate, async interaction => {
           saveStore(store);
           const user=await client.users.fetch(req.userId).catch(()=>null);
           await user?.send(`❌ ${interaction.guild.name} の認証申請 #${req.id} は却下されました。`).catch(()=>{});
-          return interaction.update({content:null,embeds:[new EmbedBuilder().setTitle(`認証申請 #${req.id}`).setDescription(`申請者：<@${req.userId}>\n申請内容：${req.panelName||'認証'}\n状態：❌ 却下済み\n処理者：<@${interaction.user.id}>`).setTimestamp()],components:[]});
+          return safeUpdate(interaction, {content:null,embeds:[new EmbedBuilder().setTitle(`認証申請 #${req.id}`).setDescription(`申請者：<@${req.userId}>\n申請内容：${req.panelName||'認証'}\n状態：❌ 却下済み\n処理者：<@${interaction.user.id}>`).setTimestamp()],components:[]});
         }
 
         if(b==='approve'){
           const member=await interaction.guild.members.fetch(req.userId).catch(()=>null);
-          if(!member)return interaction.reply({content:'❌ 対象メンバーが見つかりません。',ephemeral:true});
+          if(!member)return safeReply(interaction, {content:'❌ 対象メンバーが見つかりません。',ephemeral:true});
           const roles=[];
           for(const id of (req.roleIds||[req.roleId])){
             const role=await interaction.guild.roles.fetch(id).catch(()=>null);
-            if(!role)return interaction.reply({content:`❌ ロール ${id} が見つかりません。`,ephemeral:true});
+            if(!role)return safeReply(interaction, {content:`❌ ロール ${id} が見つかりません。`,ephemeral:true});
             const problem=rolePanelProblem(interaction.guild,role);
-            if(problem)return interaction.reply({content:`❌ ${role.name}: ${problem}`,ephemeral:true});
+            if(problem)return safeReply(interaction, {content:`❌ ${role.name}: ${problem}`,ephemeral:true});
             roles.push(role);
           }
 
@@ -2953,10 +3034,10 @@ client.on(Events.InteractionCreate, async interaction => {
             const user=await client.users.fetch(req.userId).catch(()=>null);
             await user?.send(`✅ ${interaction.guild.name} の認証申請 #${req.id} が承認され、${roles.map(r=>r.name).join("、")} が付与されました。`).catch(()=>{});
 
-            return interaction.update({content:null,embeds:[new EmbedBuilder().setTitle(`認証申請 #${req.id}`).setDescription(`申請者：<@${req.userId}>\n申請内容：${req.panelName||'認証'}\n付与ロール：${roles.map(r=>`<@&${r.id}>`).join('、')}\n状態：✅ 承認済み\n処理者：<@${interaction.user.id}>`).setTimestamp()],components:[]});
+            return safeUpdate(interaction, {content:null,embeds:[new EmbedBuilder().setTitle(`認証申請 #${req.id}`).setDescription(`申請者：<@${req.userId}>\n申請内容：${req.panelName||'認証'}\n付与ロール：${roles.map(r=>`<@&${r.id}>`).join('、')}\n状態：✅ 承認済み\n処理者：<@${interaction.user.id}>`).setTimestamp()],components:[]});
           }catch(e){
             console.error('verify approve error',e);
-            return interaction.reply({
+            return safeReply(interaction, {
               content:'❌ ロール付与に失敗しました。BOTの「ロールの管理」権限とロール順序を確認してください。',
               ephemeral:true
             });
@@ -2967,17 +3048,17 @@ client.on(Events.InteractionCreate, async interaction => {
         const channelId=a;
         const g=guildData(store,interaction.guildId); g.rolePanels ??= {};
         const cfg=g.rolePanels[channelId];
-        if(!cfg)return interaction.reply({content:'❌ このロールパネル設定が見つかりません。',ephemeral:true});
+        if(!cfg)return safeReply(interaction, {content:'❌ このロールパネル設定が見つかりません。',ephemeral:true});
         const valid=[];
         for(const opt of (cfg.roleOptions||[])){
           const role=await interaction.guild.roles.fetch(opt.roleId).catch(()=>null);
           if(!role||rolePanelProblem(interaction.guild,role))continue;
           valid.push({roleId:role.id,label:(opt.label||role.name).slice(0,80),roleName:role.name,mode:opt.mode||'instant'});
         }
-        if(!valid.length)return interaction.reply({content:'❌ 表示できるロールがありません。',ephemeral:true});
+        if(!valid.length)return safeReply(interaction, {content:'❌ 表示できるロールがありません。',ephemeral:true});
         let page=Number(b)||0;
         page += kind==='rolepanelnext'?1:-1;
-        return interaction.update(buildChannelRolePanel(channelId,cfg,valid,page));
+        return safeUpdate(interaction, buildChannelRolePanel(channelId,cfg,valid,page));
       }
 
       if (kind === 'roleprev' || kind === 'rolenext' || kind === 'rolerefresh') {
@@ -2993,7 +3074,7 @@ client.on(Events.InteractionCreate, async interaction => {
         page=kind==='rolenext'?page+1:kind==='roleprev'?page-1:page;
         page=Math.max(0,Math.min(totalPages-1,page));
         const slice=valid.slice(page*25,page*25+25);
-        if(!slice.length)return interaction.reply({content:'❌ 表示できるロールがありません。',ephemeral:true});
+        if(!slice.length)return safeReply(interaction, {content:'❌ 表示できるロールがありません。',ephemeral:true});
         const menu=new StringSelectMenuBuilder().setCustomId(`rolepage:${page}`)
           .setPlaceholder(`ロールを選択（${page+1}/${totalPages}ページ）`)
           .addOptions(slice.map(x=>({label:x.label,value:x.roleId,description:'選択で付与 / 所持中なら解除'})));
@@ -3003,26 +3084,26 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId(`roleprev:${page}`).setLabel('◀ 前へ').setStyle(ButtonStyle.Secondary).setDisabled(page===0),
           new ButtonBuilder().setCustomId(`rolenext:${page}`).setLabel(`次へ ▶ (${page+1}/${totalPages})`).setStyle(ButtonStyle.Secondary).setDisabled(page>=totalPages-1)
         ));
-        return interaction.update({components,embeds:[new EmbedBuilder().setTitle('🎭 ロール選択').setDescription(`登録ロール: **${valid.length}個**\nプルダウンから選択すると付与、所持中なら解除します。`)]});
+        return safeUpdate(interaction, {components,embeds:[new EmbedBuilder().setTitle('🎭 ロール選択').setDescription(`登録ロール: **${valid.length}個**\nプルダウンから選択すると付与、所持中なら解除します。`)]});
       }
 
       if (kind === 'role') {
         const g=guildData(store,interaction.guildId);
         const configured=g.rolePanels?.[b]?.roleOptions?.find(x=>x.roleId===a);
-        if(configured?.mode==='approval')return interaction.reply({content:'🔒 このロールは管理者承認が必要です。最新のパネルから申請してください。',ephemeral:true});
+        if(configured?.mode==='approval')return safeReply(interaction, {content:'🔒 このロールは管理者承認が必要です。最新のパネルから申請してください。',ephemeral:true});
         const role=await interaction.guild.roles.fetch(a).catch(()=>null);
         if(!role){
-          return interaction.reply({content:'❌ このロールは削除されているか、取得できません。管理者にパネルの作り直しを依頼してください。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ このロールは削除されているか、取得できません。管理者にパネルの作り直しを依頼してください。',ephemeral:true});
         }
 
         const problem=rolePanelProblem(interaction.guild,role);
         if(problem){
-          return interaction.reply({content:`❌ ${problem}`,ephemeral:true});
+          return safeReply(interaction, {content:`❌ ${problem}`,ephemeral:true});
         }
 
         const member=await interaction.guild.members.fetch(interaction.user.id).catch(()=>null);
         if(!member){
-          return interaction.reply({content:'❌ メンバー情報を取得できませんでした。',ephemeral:true});
+          return safeReply(interaction, {content:'❌ メンバー情報を取得できませんでした。',ephemeral:true});
         }
 
         const has=member.roles.cache.has(role.id);
@@ -3030,14 +3111,14 @@ client.on(Events.InteractionCreate, async interaction => {
         try{
           if(has){
             await member.roles.remove(role,'ロールパネルから解除');
-            return interaction.reply({content:`✅ **${role.name}** を外しました。`,ephemeral:true});
+            return safeReply(interaction, {content:`✅ **${role.name}** を外しました。`,ephemeral:true});
           }
 
           await member.roles.add(role,'ロールパネルから付与');
-          return interaction.reply({content:`✅ **${role.name}** を付与しました。`,ephemeral:true});
+          return safeReply(interaction, {content:`✅ **${role.name}** を付与しました。`,ephemeral:true});
         }catch(e){
           console.error('role panel error',e);
-          return interaction.reply({
+          return safeReply(interaction, {
             content:'❌ ロールを変更できませんでした。BOTの「ロールの管理」権限とロール順序を確認してください。',
             ephemeral:true
           });
@@ -3045,7 +3126,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       if (kind === 'ticket' && a === 'create') {
-        await interaction.deferReply({ephemeral:true});
+        await safeDeferReply(interaction, {ephemeral:true});
         const g=guildData(store,interaction.guildId);
         const overwrites=[
           {id:interaction.guild.id,deny:[PermissionFlagsBits.ViewChannel]},
@@ -3111,7 +3192,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (kind === 'ticketclose') {
         const ticket=store.tickets?.[a];
-        if(!ticket||ticket.guildId!==interaction.guildId)return interaction.reply({content:'❌ チケット情報がありません。',ephemeral:true});
+        if(!ticket||ticket.guildId!==interaction.guildId)return safeReply(interaction, {content:'❌ チケット情報がありません。',ephemeral:true});
 
         const g=guildData(store,interaction.guildId);
         const canClose =
@@ -3120,27 +3201,27 @@ client.on(Events.InteractionCreate, async interaction => {
           isBotOwnerUser(interaction.user) ||
           Boolean(g.ticketSupportRoleId && interaction.member?.roles?.cache?.has(g.ticketSupportRoleId));
 
-        if(!canClose)return interaction.reply({content:'❌ チケットを閉じる権限がありません。',ephemeral:true});
+        if(!canClose)return safeReply(interaction, {content:'❌ チケットを閉じる権限がありません。',ephemeral:true});
         ticket.status='closed';
         ticket.closedAt=new Date().toISOString();
         saveStore(store);
-        await interaction.reply('🔒 チケットを閉じます。');
+        await safeReply(interaction, '🔒 チケットを閉じます。');
         setTimeout(()=>interaction.channel?.delete('チケット終了').catch(()=>{}),1500);
         return;
       }
       if(kind==='pointbuy'){
-        const shop=store.shops[a],p=shop?.products?.find(x=>x.id===b); if(!shop||!p||!p.pointPrice)return interaction.reply({content:'❌ ポイント購入できない商品です。',ephemeral:true});
-        const u=economyUser(interaction.guildId,interaction.user.id); if(u.points<p.pointPrice)return interaction.reply({content:`❌ ポイント不足です。必要 ${pointText(p.pointPrice)} / 残高 ${pointText(u.points)}`,ephemeral:true});
-        if(p.stock===0)return interaction.reply({content:'❌ 在庫切れです。',ephemeral:true});
+        const shop=store.shops[a],p=shop?.products?.find(x=>x.id===b); if(!shop||!p||!p.pointPrice)return safeReply(interaction, {content:'❌ ポイント購入できない商品です。',ephemeral:true});
+        const u=economyUser(interaction.guildId,interaction.user.id); if(u.points<p.pointPrice)return safeReply(interaction, {content:`❌ ポイント不足です。必要 ${pointText(p.pointPrice)} / 残高 ${pointText(u.points)}`,ephemeral:true});
+        if(p.stock===0)return safeReply(interaction, {content:'❌ 在庫切れです。',ephemeral:true});
         u.points-=p.pointPrice;if(p.stock>0)p.stock--;saveStore(store);
         const deliveryLink=p.deliveryMode==='zip'&&p.zipFile?.url?`📦 ZIP: ${p.zipFile.url}`:p.deliveryMode==='gigafile'&&p.gigafileUrl?`📦 ギガファイル便: ${p.gigafileUrl}`:p.deliveryMode==='url'&&p.downloadUrl?`🔗 URL: ${p.downloadUrl}`:'';
         await interaction.user.send([`✅ ポイント購入完了: ${p.name}`,`使用: ${pointText(p.pointPrice)}`,deliveryLink,p.delivery||''].filter(Boolean).join('\n')).catch(()=>{});
         if(p.roleId){const m=await interaction.guild.members.fetch(interaction.user.id).catch(()=>null);if(m)await m.roles.add(p.roleId).catch(()=>{});}
-        return interaction.reply({content:`✅ **${p.name}** を ${pointText(p.pointPrice)} で購入しました。残高: **${pointText(u.points)}**`,ephemeral:true});
+        return safeReply(interaction, {content:`✅ **${p.name}** を ${pointText(p.pointPrice)} で購入しました。残高: **${pointText(u.points)}**`,ephemeral:true});
       }
       if (kind === 'buy') {
         const shop=store.shops[a],product=shop?.products?.find(p=>p.id===b);
-        if(!shop||!product)return interaction.reply({content:'❌ 商品が見つかりません。',ephemeral:true});
+        if(!shop||!product)return safeReply(interaction, {content:'❌ 商品が見つかりません。',ephemeral:true});
         const modal=new ModalBuilder().setCustomId(`buyModal:${shop.id}:${product.id}`).setTitle(product.name);
         const qty=new TextInputBuilder().setCustomId('qty').setLabel('購入数量').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('1');
         const pay=new TextInputBuilder().setCustomId('paypay').setLabel('PayPay受け取りURL').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('https://pay.paypay.ne.jp/...');
@@ -3148,13 +3229,13 @@ client.on(Events.InteractionCreate, async interaction => {
         return interaction.showModal(modal);
       }
       if (kind === 'order') {
-        const order=store.orders[a];if(!order)return interaction.reply({content:'❌ 注文が見つかりません。',ephemeral:true});
-        const shop=store.shops[order.shopId];if(!isShopManager(interaction,shop))return interaction.reply({content:'❌ 管理権限がありません。',ephemeral:true});
+        const order=store.orders[a];if(!order)return safeReply(interaction, {content:'❌ 注文が見つかりません。',ephemeral:true});
+        const shop=store.shops[order.shopId];if(!isShopManager(interaction,shop))return safeReply(interaction, {content:'❌ 管理権限がありません。',ephemeral:true});
         if(b==='complete'){
-          if(order.status==='completed')return interaction.reply({content:'処理済みです。',ephemeral:true});
+          if(order.status==='completed')return safeReply(interaction, {content:'処理済みです。',ephemeral:true});
           const p=shop.products.find(x=>x.id===order.productId);
-          if(!p)return interaction.reply({content:'❌ 商品が見つかりません。',ephemeral:true});
-          if(p.stock>=0 && p.stock<order.qty)return interaction.reply({content:'❌ 在庫不足です。',ephemeral:true});
+          if(!p)return safeReply(interaction, {content:'❌ 商品が見つかりません。',ephemeral:true});
+          if(p.stock>=0 && p.stock<order.qty)return safeReply(interaction, {content:'❌ 在庫不足です。',ephemeral:true});
 
           if(p.stock>=0)p.stock-=order.qty;
           order.status='completed';
@@ -3199,9 +3280,9 @@ client.on(Events.InteractionCreate, async interaction => {
             }
           }
 
-          return interaction.reply('✅ 受け取り完了・商品配布しました。');
+          return safeReply(interaction, '✅ 受け取り完了・商品配布しました。');
         }
-        if(b==='reject'){order.status='rejected';saveStore(store);return interaction.reply('❌ 注文を却下しました。');}
+        if(b==='reject'){order.status='rejected';saveStore(store);return safeReply(interaction, '❌ 注文を却下しました。');}
       }
     }
 
@@ -3210,16 +3291,16 @@ client.on(Events.InteractionCreate, async interaction => {
       const id=store.nextShopId++;
       const shop={id,guildId:interaction.guildId,ownerId:interaction.user.id,name,managerRoleId:null,orderChannelId:interaction.channelId,salesChannelId:null,historyChannelId:interaction.channelId,active:true,products:[],showSalesCount:false};
       store.shops[id]=shop;saveStore(store);
-      return interaction.reply({content:`✅ 自動販売機 #${id}「${name}」を作成しました。\n\`/shop-admin\` → **自販機設定** から設定できます。`,ephemeral:true});
+      return safeReply(interaction, {content:`✅ 自動販売機 #${id}「${name}」を作成しました。\n\`/shop-admin\` → **自販機設定** から設定できます。`,ephemeral:true});
     }
 
     if (interaction.isModalSubmit() && interaction.customId.startsWith('buyModal:')) {
       const [,shopId,productId]=interaction.customId.split(':'),shop=store.shops[shopId],p=shop?.products?.find(x=>x.id===productId);
-      if(!shop||!p)return interaction.reply({content:'❌ 商品が見つかりません。',ephemeral:true});
+      if(!shop||!p)return safeReply(interaction, {content:'❌ 商品が見つかりません。',ephemeral:true});
       const qty=Number(interaction.fields.getTextInputValue('qty')),paypay=interaction.fields.getTextInputValue('paypay').trim();
-      if(!Number.isInteger(qty)||qty<1)return interaction.reply({content:'❌ 数量が不正です。',ephemeral:true});
-      if(p.stock>=0 && qty>p.stock)return interaction.reply({content:`❌ 在庫不足です。現在 ${p.stock} 個です。`,ephemeral:true});
-      if(!paypay.startsWith('https://pay.paypay.ne.jp/'))return interaction.reply({content:'❌ PayPay受け取りURLを入力してください。',ephemeral:true});
+      if(!Number.isInteger(qty)||qty<1)return safeReply(interaction, {content:'❌ 数量が不正です。',ephemeral:true});
+      if(p.stock>=0 && qty>p.stock)return safeReply(interaction, {content:`❌ 在庫不足です。現在 ${p.stock} 個です。`,ephemeral:true});
+      if(!paypay.startsWith('https://pay.paypay.ne.jp/'))return safeReply(interaction, {content:'❌ PayPay受け取りURLを入力してください。',ephemeral:true});
       const id=store.nextOrderId++;
       const order={id,guildId:interaction.guildId,shopId:Number(shopId),productId,userId:interaction.user.id,buyerUsername:interaction.user.username,buyerDisplayName:interaction.user.globalName||interaction.user.username,qty,total:p.price*qty,paypay,status:'pending',createdAt:new Date().toISOString(),ticketChannelId:null};
       store.orders[id]=order;
@@ -3274,13 +3355,13 @@ client.on(Events.InteractionCreate, async interaction => {
       const seller=await client.users.fetch(shop.ownerId).catch(()=>null);
       await seller?.send(`📩 自動販売機「${shop.name}」で商品が購入されました。\n注文 #${id}\n購入者: ${interaction.user.username} / <@${interaction.user.id}> / ID: ${interaction.user.id}\n商品: ${p.name} × ${qty}\n合計: ¥${order.total.toLocaleString()}${ticketChannel?`\n購入チケット: https://discord.com/channels/${interaction.guildId}/${ticketChannel.id}`:''}`).catch(()=>{});
 
-      return interaction.reply({content:`✅ 注文 #${id} を送信しました。合計 ¥${order.total.toLocaleString()} です。${ticketChannel?`\n販売者との専用チケット: <#${ticketChannel.id}>`:'\n⚠️ 専用チケット作成に失敗したため、販売者へ通知しました。'}`,ephemeral:true});
+      return safeReply(interaction, {content:`✅ 注文 #${id} を送信しました。合計 ¥${order.total.toLocaleString()} です。${ticketChannel?`\n販売者との専用チケット: <#${ticketChannel.id}>`:'\n⚠️ 専用チケット作成に失敗したため、販売者へ通知しました。'}`,ephemeral:true});
     }
   } catch (e) {
     console.error('❌ Interaction処理エラー:', e);
     if(interaction.isRepliable()){
       const m={content:`❌ エラーが発生しました: **${e?.name||'Error'}**\n${String(e?.message||e).slice(0,1200)}`,ephemeral:true};
-      if(interaction.replied||interaction.deferred)interaction.followUp(m).catch(()=>{});else interaction.reply(m).catch(()=>{});
+      if(interaction.replied||interaction.deferred)interaction.followUp(m).catch(()=>{});else safeReply(interaction, m).catch(()=>{});
     }
   }
 });
