@@ -1,0 +1,10 @@
+Discord MultiBot v6.0.31
+
+/image に画像編集サブコマンドを追加しました。
+- /image rotate-left : 左回り（反時計回り）90°
+- /image rotate-right : 右回り（時計回り）90°
+- /image flip-horizontal : 左右反転
+- /image flip-vertical : 上下反転
+
+入力画像のEXIF向きを正規化してから加工し、結果はPNGで返します。
+コマンド追加のため npm run deploy-commands を実行してください。

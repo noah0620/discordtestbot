@@ -1,0 +1,8 @@
+v6.0.27
+- DiscordのグローバルSlash Command上限100件を超えていた問題を修正（103件→100件）
+- weather-auto-add/list/remove を /weather-auto のサブコマンドへ統合
+- /weather-auto add で地域・投稿先チャンネル・時刻を複数登録可能
+- /weather-auto list で登録一覧を表示
+- /weather-auto remove で設定ID単位に削除
+- 従来の共通天気設定は /weather-auto setup に移行
+- 複数チャンネルごとの天気自動投稿処理を維持

@@ -1,0 +1,10 @@
+Discord MultiBot v6.0.16
+
+追加:
+- /game tictactoe opponent:@ユーザー : 3x3（9マス）の三目並べ
+- /game rps : BOTとじゃんけん
+- /timer start minutes: 3分/5分/10分ショートカット
+- /timer custom minutes: 1〜1440分
+- /timer status : 残り時間確認
+- /timer cancel : キャンセル
+- /help にゲーム・タイマーの詳細ページを自動追加
