@@ -191,6 +191,35 @@ async function safeUpdate(interaction, payload){
   }
 }
 
+async function safeDeferUpdate(interaction){
+  if(!interaction?.isButton?.()) return false;
+  if(interaction.deferred || interaction.replied) return true;
+  try{
+    await interaction.deferUpdate();
+    return true;
+  }catch(e){
+    if(e?.code===10062 || e?.code===40060){
+      console.warn(`⚠️ Button ACK失敗: ${interaction.id} / code=${e.code}`);
+      return false;
+    }
+    throw e;
+  }
+}
+
+async function safeButtonNotice(interaction, content){
+  const payload={content,ephemeral:true};
+  try{
+    if(interaction.deferred || interaction.replied) return await interaction.followUp(payload);
+    return await interaction.reply(payload);
+  }catch(e){
+    if(e?.code===10062 || e?.code===40060){
+      console.warn(`⚠️ Button通知をスキップ: ${interaction.id} / code=${e.code}`);
+      return null;
+    }
+    throw e;
+  }
+}
+
 assertConfig();
 const store = loadStore();
 console.log(`🔐 BOTオーナーID読込: ${config.ownerIds.length}件 / .env: ${config.envPath}`);
@@ -501,36 +530,68 @@ async function createMusicSession(interaction,vc){
   player.on('error',e=>console.error('🔴 AudioPlayer error:',e));
   player.on(AudioPlayerStatus.Playing,()=>console.log(`🔊 音楽再生開始: guild=${interaction.guildId} vc=${vc.id}`));
   player.on(AudioPlayerStatus.Paused,()=>console.log(`⏸️ 音楽一時停止: guild=${interaction.guildId} vc=${vc.id}`));
-  const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,startedAt:null};
-  player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
+  const s={key,guildId:interaction.guildId,voiceChannelId:vc.id,client:botClient,connection,player,queue:[],playing:false,current:null,volume:100,ffmpeg:null,sourceProc:null,tempDir:null,startedAt:null};
+  player.on(AudioPlayerStatus.Idle,()=>{try{s.ffmpeg?.kill();}catch{};try{s.sourceProc?.kill();}catch{};s.sourceProc=null;const oldDir=s.tempDir;s.tempDir=null;if(oldDir)fs.rm(oldDir,{recursive:true,force:true}).catch(()=>{});if(s.current&&s.startedAt){const st=musicStats(s.guildId);const t=st.tracks[s.current.id];if(t)t.seconds=(t.seconds||0)+Math.max(0,Math.floor((Date.now()-s.startedAt)/1000));saveStore(store);}s.ffmpeg=null;s.playing=false;s.current=null;s.startedAt=null;playNext(key).catch(console.error);});
   players.set(key,s);return s;
 }
 
-function createFfmpegAudio(pageUrl){
+async function createYtDlpStreamingAudio(pageUrl){
   if(!validHttpUrl(pageUrl))throw new Error('再生URLが正しくありません。');
-  // YouTube CDNの一時URLをFFmpegへ直接渡す方式は403/ヘッダー差異で無音になりやすい。
-  // yt-dlp自身にメディアをstdoutへ流させ、FFmpegはstdinからデコードする。
-  const command=ytDlpPythonCommand();
-  const downloader=spawn(command,['-m','yt_dlp',
-    '--no-playlist','--no-warnings','--quiet',
-    '-f','bestaudio/best','-o','-',
-    ...musicCookieArgs(),pageUrl
-  ],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+  // Takinoko記事方式: yt-dlp の stdout をそのまま FFmpeg に渡して低遅延再生する。
+  const py=process.platform==='win32'?'python':'python3';
+  const ytdlpArgs=['-m','yt_dlp','--no-playlist','--no-warnings','-f','bestaudio[ext=webm]/bestaudio','-o','-',...musicCookieArgs(),pageUrl];
+  console.log(`🎵 yt-dlpストリーム開始: ${pageUrl}`);
+  const ytdlp=spawn(py,ytdlpArgs,{windowsHide:true,stdio:['ignore','pipe','pipe']});
+  let ytdlpErr='';
+  ytdlp.stderr?.on('data',d=>{const m=String(d);ytdlpErr=(ytdlpErr+m).slice(-5000);if(m.trim())console.log(`yt-dlp: ${m.trim()}`);});
   const proc=spawn(ffmpegPath,[
-    '-hide_banner','-loglevel','warning',
-    '-i','pipe:0',
-    '-vn','-f','s16le','-ar','48000','-ac','2','pipe:1'
+    '-hide_banner','-loglevel','warning','-nostdin',
+    '-i','pipe:0','-vn','-acodec','pcm_s16le','-f','s16le','-ar','48000','-ac','2','pipe:1'
   ],{windowsHide:true,stdio:['pipe','pipe','pipe']});
-  downloader.stdout.pipe(proc.stdin);
-  downloader.stderr?.on('data',d=>{const m=String(d).trim();if(m)console.error(`yt-dlp audio: ${m}`);});
-  proc.stderr?.on('data',d=>{const m=String(d).trim();if(m)console.error(`ffmpeg audio: ${m}`);});
-  downloader.on('error',e=>console.error('yt-dlp audio process error:',e));
-  proc.on('error',e=>console.error('ffmpeg audio process error:',e));
-  downloader.on('close',code=>{if(code&&code!==0)console.error(`yt-dlp audio exited: ${code}`);});
-  proc.on('close',()=>{try{if(!downloader.killed)downloader.kill('SIGKILL');}catch{}});
-  // 既存の停止処理はs.ffmpeg.kill()を呼ぶため、FFmpeg終了時にyt-dlpも連動終了する。
+  let ffmpegErr='';
+  proc.stderr?.on('data',d=>{const m=String(d);ffmpegErr=(ffmpegErr+m).slice(-5000);if(m.trim())console.error(`ffmpeg audio: ${m.trim()}`);});
+  ytdlp.stdout.pipe(proc.stdin);
+  const cleanup=()=>{try{ytdlp.kill('SIGKILL');}catch{};try{proc.kill('SIGKILL');}catch{}};
+  const startup=new Promise((resolve,reject)=>{
+    let settled=false;
+    const ok=()=>{if(!settled){settled=true;resolve();}};
+    const bad=(msg)=>{if(!settled){settled=true;reject(new Error(msg));}};
+    const timer=setTimeout(ok,1800); // プロセスが即死しなければ再生へ進む
+    ytdlp.once('error',e=>{clearTimeout(timer);bad(`yt-dlp起動失敗: ${e.message}`);});
+    proc.once('error',e=>{clearTimeout(timer);bad(`FFmpeg起動失敗: ${e.message}`);});
+    ytdlp.once('close',code=>{if(code&&code!==0){clearTimeout(timer);bad(`yt-dlpストリーム失敗(code=${code}): ${ytdlpErr.slice(-1000)}`);}});
+    proc.once('close',code=>{if(code&&code!==0){clearTimeout(timer);bad(`FFmpegストリーム失敗(code=${code}): ${ffmpegErr.slice(-1000)}`);}});
+  });
+  try{await startup;}catch(e){cleanup();throw e;}
   const resource=createAudioResource(proc.stdout,{inputType:StreamType.Raw,inlineVolume:true});
-  return {proc,resource,downloader};
+  return {proc,resource,dir:null,sourceProc:ytdlp,mode:'stream',getError:()=>`${ytdlpErr}\n${ffmpegErr}`};
+}
+
+async function createDownloadedAudio(pageUrl){
+  if(!validHttpUrl(pageUrl))throw new Error('再生URLが正しくありません。');
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'discord-music-'));
+  const output=path.join(dir,'audio.%(ext)s');
+  console.log('📥 ストリーム失敗時フォールバック: yt-dlp一時ファイル取得');
+  try{
+    await runYtDlp(['--no-playlist','--no-warnings','--restrict-filenames','-f','bestaudio/best','-o',output,'--ffmpeg-location',ffmpegPath,...musicCookieArgs(),pageUrl],{capture:true});
+    const files=(await fs.readdir(dir)).filter(x=>!x.endsWith('.part')&&!x.endsWith('.ytdl'));
+    if(!files.length)throw new Error('yt-dlpで音声ファイルを取得できませんでした。');
+    const input=path.join(dir,files[0]);
+    const proc=spawn(ffmpegPath,['-hide_banner','-loglevel','warning','-nostdin','-i',input,'-vn','-acodec','pcm_s16le','-f','s16le','-ar','48000','-ac','2','pipe:1'],{windowsHide:true,stdio:['ignore','pipe','pipe']});
+    let ffmpegErr='';
+    proc.stderr?.on('data',d=>{const m=String(d);ffmpegErr=(ffmpegErr+m).slice(-4000);if(m.trim())console.error(`ffmpeg audio: ${m.trim()}`);});
+    const resource=createAudioResource(proc.stdout,{inputType:StreamType.Raw,inlineVolume:true});
+    return {proc,resource,dir,sourceProc:null,mode:'download',getError:()=>ffmpegErr};
+  }catch(e){await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});throw e;}
+}
+
+async function createFfmpegAudio(pageUrl){
+  try{return await createYtDlpStreamingAudio(pageUrl);}
+  catch(streamError){
+    console.warn(`⚠️ yt-dlpストリーム方式失敗 → 一時ファイル方式へ切替: ${streamError.message}`);
+    try{return await createDownloadedAudio(pageUrl);}
+    catch(downloadError){throw new Error(`音楽取得に失敗しました。\nストリーム: ${streamError.message}\nダウンロード: ${downloadError.message}`);}
+  }
 }
 
 function buildChannelRolePanel(channelId,cfg,valid,page=0){
@@ -1153,13 +1214,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
     // 音楽プレイヤーボタンは他の処理より先にACKする。
     if(interaction.isButton() && interaction.customId.startsWith('rps2:')){
-      await interaction.deferUpdate().catch(()=>{}); const [,id,choice]=interaction.customId.split(':'),g=rpsGames.get(id);
-      if(!g)return interaction.followUp({content:'❌ この対戦は終了しています。',ephemeral:true});
-      if(!g.players.includes(interaction.user.id) || interaction.user.id===client.user.id)return interaction.followUp({content:'❌ 対戦者だけが選択できます。',ephemeral:true});
-      if(g.choices[interaction.user.id])return interaction.followUp({content:'✅ すでに手を選択済みです。',ephemeral:true});
+      if(!await safeDeferUpdate(interaction)) return; const [,id,choice]=interaction.customId.split(':'),g=rpsGames.get(id);
+      if(!g)return safeButtonNotice(interaction,'❌ この対戦は終了しています。');
+      if(!g.players.includes(interaction.user.id) || interaction.user.id===client.user.id)return safeButtonNotice(interaction,'❌ 対戦者だけが選択できます。');
+      if(g.choices[interaction.user.id])return safeButtonNotice(interaction,'✅ すでに手を選択済みです。');
       g.choices[interaction.user.id]=choice;
       if(g.bot){g.choices[client.user.id]=['rock','scissors','paper'][Math.floor(Math.random()*3)];}
-      if(!g.choices[g.players[0]]||!g.choices[g.players[1]])return interaction.followUp({content:'✅ 手を選びました。相手の選択を待っています。',ephemeral:true});
+      if(!g.choices[g.players[0]]||!g.choices[g.players[1]])return safeButtonNotice(interaction,'✅ 手を選びました。相手の選択を待っています。');
       const a=g.choices[g.players[0]],b=g.choices[g.players[1]],label={rock:'✊ グー',scissors:'✌️ チョキ',paper:'✋ パー'};
       const win=(a==='rock'&&b==='scissors')||(a==='scissors'&&b==='paper')||(a==='paper'&&b==='rock');
       const result=a===b?'🤝 引き分け':win?`🏆 <@${g.players[0]}> の勝ち！`:`🏆 ${g.bot?'BOT':`<@${g.players[1]}>`} の勝ち！`;
@@ -2636,7 +2697,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (n === 'queue') {const s=sessionForInteraction(interaction);const lines=[];if(s?.current)lines.push(`▶️ **${s.current.title}**`);if(s?.queue?.length)lines.push(...s.queue.map((x,k)=>`${k+1}. ${x.title}`));return safeReply(interaction, lines.join('\n')||'このVCのキューは空です。');}
       if (n === 'skip') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.stop(true);return safeReply(interaction, '⏭️ スキップしました。');}
-      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{}s.player.stop(true);s.connection.destroy();players.delete(s.key);}return safeReply(interaction, '⏹️ このVCの再生を停止しました。');}
+      if (n === 'stop') {const s=sessionForInteraction(interaction);if(s){s.queue.length=0;try{s.ffmpeg?.kill();}catch{};try{s.sourceProc?.kill();}catch{};if(s.tempDir)fs.rm(s.tempDir,{recursive:true,force:true}).catch(()=>{});s.player.stop(true);s.connection.destroy();players.delete(s.key);}return safeReply(interaction, '⏹️ このVCの再生を停止しました。');}
       if (n === 'pause') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.pause();return safeReply(interaction, '⏸️ 一時停止しました。');}
       if (n === 'resume') {const s=sessionForInteraction(interaction);if(!s)return safeReply(interaction, {content:'このVCでは再生していません。',ephemeral:true});s.player.unpause();return safeReply(interaction, '▶️ 再開しました。');}
       if (n === 'nowplaying') {const s=sessionForInteraction(interaction);return safeReply(interaction, s?.current?`🎵 **${s.current.title}**\n${s.current.url}\n担当: <@${s.client.user.id}>`:'このVCでは現在再生していません。');}
@@ -2864,12 +2925,12 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('ttt:')){
-      await interaction.deferUpdate().catch(()=>{});
+      if(!await safeDeferUpdate(interaction)) return;
       const [,gameId,posRaw]=interaction.customId.split(':'); const game=ticTacToeGames.get(gameId),pos=Number(posRaw);
-      if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
-      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
-      if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
-      if(!Number.isInteger(pos)||pos<0||pos>8||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
+      if(!game||game.ended)return safeButtonNotice(interaction,'❌ このゲームは終了しています。');
+      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return safeButtonNotice(interaction,'❌ この対戦の参加者ではありません。');
+      if(game.players[game.turn]!==interaction.user.id)return safeButtonNotice(interaction,'⏳ 相手の手番です。');
+      if(!Number.isInteger(pos)||pos<0||pos>8||game.board[pos])return safeButtonNotice(interaction,'❌ そのマスには置けません。');
       const wins=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]],isWin=m=>wins.some(a=>a.every(i=>game.board[i]===m));
       const impossibleDraw=()=>!wins.some(line=>line.every(i=>game.board[i]!=='O'))&&!wins.some(line=>line.every(i=>game.board[i]!=='X'));
       const mark=game.turn===0?'X':'O';game.board[pos]=mark;let winner=isWin(mark)?game.turn:null;
@@ -2886,12 +2947,12 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if(interaction.isButton() && interaction.customId.startsWith('gomoku:')){
-      await interaction.deferUpdate().catch(()=>{});
+      if(!await safeDeferUpdate(interaction)) return;
       const [,gameId,posRaw]=interaction.customId.split(':'); const game=gomokuGames.get(gameId),pos=Number(posRaw);
-      if(!game||game.ended)return interaction.followUp({content:'❌ このゲームは終了しています。',ephemeral:true});
-      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return interaction.followUp({content:'❌ この対戦の参加者ではありません。',ephemeral:true});
-      if(game.players[game.turn]!==interaction.user.id)return interaction.followUp({content:'⏳ 相手の手番です。',ephemeral:true});
-      if(!Number.isInteger(pos)||pos<0||pos>24||game.board[pos])return interaction.followUp({content:'❌ そのマスには置けません。',ephemeral:true});
+      if(!game||game.ended)return safeButtonNotice(interaction,'❌ このゲームは終了しています。');
+      if(!game.players.includes(interaction.user.id)||interaction.user.id===client.user.id)return safeButtonNotice(interaction,'❌ この対戦の参加者ではありません。');
+      if(game.players[game.turn]!==interaction.user.id)return safeButtonNotice(interaction,'⏳ 相手の手番です。');
+      if(!Number.isInteger(pos)||pos<0||pos>24||game.board[pos])return safeButtonNotice(interaction,'❌ そのマスには置けません。');
       const lines=[];for(let r=0;r<5;r++)lines.push([0,1,2,3,4].map(c=>r*5+c));for(let c=0;c<5;c++)lines.push([0,1,2,3,4].map(r=>r*5+c));lines.push([0,6,12,18,24],[4,8,12,16,20]);
       const isWin=m=>lines.some(a=>a.every(i=>game.board[i]===m)),impossibleDraw=()=>!lines.some(line=>line.every(i=>game.board[i]!=='O'))&&!lines.some(line=>line.every(i=>game.board[i]!=='X'));
       const mark=game.turn===0?'X':'O';game.board[pos]=mark;let winner=isWin(mark)?game.turn:null;
@@ -3404,7 +3465,7 @@ async function autoLeaveEmptyMusicSessions(guildId){
     const humans=ch?.members?.filter(m=>!m.user.bot).size??0;
     if(!ch||humans===0){
       console.log(`👋 VCが無人のため音楽BOT自動退出: ${s.voiceChannelId}`);
-      s.queue.length=0;try{s.ffmpeg?.kill('SIGKILL');}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
+      s.queue.length=0;try{s.ffmpeg?.kill('SIGKILL');}catch{};try{s.sourceProc?.kill('SIGKILL');}catch{};try{s.player.stop(true);}catch{};try{s.connection.destroy();}catch{};players.delete(s.key);
     }
   }
 }
@@ -3418,8 +3479,9 @@ async function playNext(key){
   if(!s||s.playing||!s.queue.length)return;
   const track=s.queue.shift();
   try{
-    const {proc,resource}=createFfmpegAudio(track.url);
-    s.current=track;s.playing=true;s.ffmpeg=proc;s.startedAt=Date.now();
+    const {proc,resource,dir,sourceProc,mode}=await createFfmpegAudio(track.url);
+    s.current=track;s.playing=true;s.ffmpeg=proc;s.sourceProc=sourceProc||null;s.tempDir=dir;s.startedAt=Date.now();
+    console.log(`🎶 再生方式: ${mode==='stream'?'yt-dlpストリーム':'一時ファイルフォールバック'} / ${track.title}`);
     resource.volume?.setVolume((s.volume??100)/100);recordTrackStart(s.guildId,track);
     proc.on('error',e=>{console.error('ffmpeg process error',e);s.playing=false;s.current=null;s.ffmpeg=null;try{s.player.stop(true);}catch{}});
     proc.on('close',code=>{if(code&&code!==0)console.error(`ffmpeg exited: ${code}`);});

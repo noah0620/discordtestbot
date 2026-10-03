@@ -37,19 +37,58 @@ const registered = await rest.put(
 
 console.log(`✅ Global commands registered to ${actualApplicationId}: ${registered.length}`);
 
-// Discord API側へ本当に登録された内容を再取得して検証する。
+// Discord API側へ本当に登録された内容を再取得して、ローカル定義と完全照合する。
 const remote = await rest.get(Routes.applicationCommands(actualApplicationId));
-const remoteNames = remote.map(c=>c.name);
-const era = remote.find(c=>c.name==='era');
-console.log(`🔎 Discord側 /era: ${era ? '✅ 登録済み' : '❌ 見つかりません'}`);
-if (era) {
-  const subNames = (era.options || []).filter(o=>o.type===1).map(o=>o.name);
-  console.log(`   /era サブコマンド: ${subNames.length ? subNames.join(', ') : 'なし'}`);
-  if (!subNames.includes('search')) {
-    throw new Error('Discord側の /era に search サブコマンドがありません。');
+const remoteByName = new Map(remote.map(c=>[c.name,c]));
+const missing = body.filter(c=>!remoteByName.has(c.name)).map(c=>c.name);
+if(missing.length) throw new Error(`Discord側に未登録のコマンドがあります: ${missing.join(', ')}`);
+
+function optionTree(options=[]){
+  return options
+    .filter(o=>o.type===1 || o.type===2)
+    .map(o=>({name:o.name,type:o.type,children:optionTree(o.options||[])}));
+}
+function flatTree(prefix, options=[]){
+  const out=[];
+  for(const o of options){
+    if(o.type!==1 && o.type!==2) continue;
+    const key=prefix ? `${prefix} ${o.name}` : o.name;
+    out.push(key);
+    out.push(...flatTree(key,o.options||[]));
   }
+  return out;
 }
-if (!era) {
-  throw new Error('Discord APIへの登録後確認で /era が見つかりませんでした。');
+
+for(const local of body){
+  const r=remoteByName.get(local.name);
+  const want=flatTree(`/${local.name}`,local.options||[]);
+  const got=new Set(flatTree(`/${r.name}`,r.options||[]));
+  const miss=want.filter(x=>!got.has(x));
+  if(miss.length) throw new Error(`/${local.name} のサブコマンド登録不一致: ${miss.join(', ')}`);
 }
-console.log('ℹ️ Discordアプリ側で古い候補が残る場合はDiscordを再起動してから /era を入力してください。');
+
+const imageCmd=remoteByName.get('image');
+if(!imageCmd) throw new Error('Discord側に /image がありません。');
+const imageSubs=(imageCmd.options||[]).filter(o=>o.type===1).map(o=>o.name);
+const requiredImage=['bg-remove','pdf','compress','video-compress','enhance','rotate-left','rotate-right','flip-horizontal','flip-vertical'];
+const missingImage=requiredImage.filter(x=>!imageSubs.includes(x));
+console.log(`🖼️ Discord側 /image: ${imageSubs.join(', ')}`);
+if(missingImage.length) throw new Error(`/image の登録不足: ${missingImage.join(', ')}`);
+
+const gameCmd=remoteByName.get('game');
+if(!gameCmd) throw new Error('Discord側に /game がありません。');
+const gameSubs=(gameCmd.options||[]).filter(o=>o.type===1).map(o=>o.name);
+const requiredGames=['tictactoe','gomoku','rps','othello','chess','shogi'];
+const missingGames=requiredGames.filter(x=>!gameSubs.includes(x));
+console.log(`🎮 Discord側 /game: ${gameSubs.join(', ')}`);
+if(missingGames.length) throw new Error(`/game の登録不足: ${missingGames.join(', ')}`);
+
+const musicCmd=remoteByName.get('music');
+if(!musicCmd) throw new Error('Discord側に /music がありません。');
+const musicSubs=(musicCmd.options||[]).filter(o=>o.type===1).map(o=>o.name);
+console.log(`🎵 Discord側 /music: ${musicSubs.join(', ')}`);
+if(!musicSubs.includes('play')) throw new Error('/music play がDiscord側に登録されていません。');
+
+console.log(`🔎 Discord側コマンド総数: ${remote.length} / ローカル: ${body.length}`);
+console.log('✅ 全トップレベルコマンドとサブコマンドのDiscord登録を確認しました。');
+console.log('ℹ️ Discordクライアントに古い候補が残る場合は、Discordを完全終了→再起動してください。');

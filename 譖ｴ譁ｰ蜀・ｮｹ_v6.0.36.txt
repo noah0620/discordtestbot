@@ -1,0 +1,8 @@
+Discord MultiBot v6.0.36
+
+- ButtonInteraction のACK処理を修正
+- deferUpdate失敗後にfollowUpして InteractionNotReplied になる問題を修正
+- 10062/40060時は後続のボタン処理を中止
+- 三目並べ・五目並べ・じゃんけんのボタン通知を安全化
+- /game 6種の定義・実行処理・deploy検証を維持
+- deploy-commands 実行時にDiscord API上の /game 6種を照合
