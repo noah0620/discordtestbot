@@ -1,0 +1,7 @@
+Discord MultiBot v6.0.33
+
+- /image がhelpには出るのにDiscord側で使えない問題の診断を強化
+- deploy-commands.js を全コマンド・全サブコマンド照合方式へ変更
+- /image の9サブコマンドをDiscord API再取得後に必須検証
+- 登録不足があれば成功表示せず具体的な不足名をエラー表示
+- Global command PUTで現在のローカル定義へ一括同期

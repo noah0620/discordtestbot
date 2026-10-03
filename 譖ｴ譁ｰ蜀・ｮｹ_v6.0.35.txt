@@ -1,0 +1,17 @@
+Discord MultiBot v6.0.35
+
+音楽再生安定化
+- Takinoko音楽BOT記事の構成を参考に、yt-dlp stdoutストリーミングを第一候補へ変更
+- yt-dlp -> FFmpeg -> Discord Voice の低遅延パイプ再生
+- ストリーム取得失敗時は従来の一時ファイル方式へ自動フォールバック
+- cookies.txt / YOUTUBE_COOKIE を両方式で利用
+- yt-dlp / FFmpeg の失敗内容をコンソールへ表示
+- 停止・退出・VC無人時にyt-dlp/FFmpegプロセスを確実に終了
+- サーバー/VC単位の既存キュー、Idle時の次曲再生を維持
+
+起動前確認
+1. python -m yt_dlp --version
+2. cookies.txt を必要に応じてプロジェクトルートへ配置
+3. BOTに Connect / Speak 権限があること
+4. npm install
+5. npm start

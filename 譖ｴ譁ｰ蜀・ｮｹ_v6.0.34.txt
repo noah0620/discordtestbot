@@ -1,0 +1,8 @@
+v6.0.34
+- /game の tictactoe / gomoku / rps / othello / chess / shogi をDiscord API登録後に明示検証
+- /music play の再生経路を安定化
+  yt-dlpでbestaudioを一時ファイルへ取得 → FFmpegで48kHz stereo PCMへ変換 → Discord Voiceへ再生
+- cookies.txt対応維持
+- 再生終了・停止時の一時音声ファイル自動削除
+- /music play のDiscord API登録もdeploy時に検証
+参考: Qiita「ディスコード音楽ボットの作成」(2024-01-30) の yt-dlpで取得したローカル音声をFFmpegで再生する構成をNode.js版へ適用。
